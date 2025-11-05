@@ -4,7 +4,14 @@
  * Performs WiFi scanning on assigned channels and reports results to controller.
  *
  * Hardware: ESP32-C5
- * Communication: Serial to controller
+ * Communication: Daisy chain - Direct UART connection to left and right neighbors
+ *
+ * Daisy Chain Topology:
+ *   Controller <-> Sub1 <-> Sub2 <-> ... <-> Sub48
+ *
+ * Each subordinate (except ends):
+ *   - Upstream (left) connection: Receives from/sends to previous device (toward controller)
+ *   - Downstream (right) connection: Receives from/sends to next device (away from controller)
  */
 
 #include "../common/protocol_defs.h"
@@ -12,13 +19,27 @@
 #include <WiFi.h>
 
 // Configuration - SET THIS FOR EACH DEVICE
-#define MY_ADDRESS 1  // Change this for each subordinate (1-48)
+#define MY_ADDRESS 1        // Change this for each subordinate (1-48)
+#define IS_LAST_NODE false  // Set to true ONLY for the last subordinate in the chain
 
 // Pin Configuration
 #define LED_PIN 2
 
+// UART Pin Configuration
+// Upstream Serial (to previous device / toward controller)
+#define UPSTREAM_TX_PIN 21   // ESP32-C5 TX to previous device's RX
+#define UPSTREAM_RX_PIN 20   // ESP32-C5 RX from previous device's TX
+
+// Downstream Serial (to next device / away from controller)
+#define DOWNSTREAM_TX_PIN 17 // ESP32-C5 TX to next device's RX
+#define DOWNSTREAM_RX_PIN 16 // ESP32-C5 RX from next device's TX
+
 // Serial communication
-SerialProtocol protocol(&Serial, MY_ADDRESS);
+// Use Serial1 for upstream, Serial2 for downstream
+HardwareSerial upstreamSerial(1);    // UART1
+HardwareSerial downstreamSerial(2);  // UART2
+
+SerialProtocol protocol(&upstreamSerial, &downstreamSerial, MY_ADDRESS, IS_LAST_NODE);
 
 // Scan parameters
 ScanParams scanParams = {
@@ -57,7 +78,15 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   bootTime = millis();
 
-  // Initialize serial protocol
+  // Configure UART pins
+  upstreamSerial.begin(SERIAL_BAUD_RATE, SERIAL_8N1, UPSTREAM_RX_PIN, UPSTREAM_TX_PIN);
+
+  // Only configure downstream if not the last node
+  if (!IS_LAST_NODE) {
+    downstreamSerial.begin(SERIAL_BAUD_RATE, SERIAL_8N1, DOWNSTREAM_RX_PIN, DOWNSTREAM_TX_PIN);
+  }
+
+  // Initialize serial protocol (it will use the configured serials)
   protocol.begin(SERIAL_BAUD_RATE);
 
   // Set WiFi to station mode

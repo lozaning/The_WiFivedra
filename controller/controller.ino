@@ -5,7 +5,13 @@
  * across all 2.4GHz and 5GHz channels.
  *
  * Hardware: ESP32 (main controller)
- * Communication: Serial bus to subordinates
+ * Communication: Daisy chain - Direct UART connection to first subordinate
+ *
+ * Daisy Chain Topology:
+ *   Controller -> Sub1 <-> Sub2 <-> Sub3 <-> ... <-> Sub48
+ *
+ * The controller only connects to the first subordinate.
+ * Messages are automatically forwarded down the chain by each subordinate.
  */
 
 #include "../common/protocol_defs.h"
@@ -17,9 +23,13 @@
 #define SD_CS_PIN 5
 #define LED_PIN 2
 
+// Downstream UART Pin Configuration (connection to first subordinate)
+#define DOWNSTREAM_TX_PIN 17  // ESP32 TX to Sub1's RX
+#define DOWNSTREAM_RX_PIN 16  // ESP32 RX from Sub1's TX
+
 // Serial ports for subordinate communication
-// Using Serial1 for subordinates (can expand to multiple UART if needed)
-SerialProtocol protocol(&Serial1, CONTROLLER_ADDRESS);
+HardwareSerial downstreamSerial(1);  // Serial1 for daisy chain
+SerialProtocol protocol(&downstreamSerial, CONTROLLER_ADDRESS);
 
 // Subordinate tracking
 struct SubordinateInfo {
@@ -66,6 +76,7 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
 
   Serial.println("\n\n=== WiFivedra Controller ===");
+  Serial.println("Daisy Chain Mode");
   Serial.println("Initializing...");
 
   // Initialize subordinate tracking
@@ -76,9 +87,12 @@ void setup() {
     subordinates[i].totalResults = 0;
   }
 
+  // Configure downstream UART pins
+  downstreamSerial.begin(SERIAL_BAUD_RATE, SERIAL_8N1, DOWNSTREAM_RX_PIN, DOWNSTREAM_TX_PIN);
+
   // Initialize serial protocol
   protocol.begin(SERIAL_BAUD_RATE);
-  Serial.println("Serial protocol initialized");
+  Serial.println("Serial protocol initialized (daisy chain)");
 
   // Initialize SD card
   if (SD.begin(SD_CS_PIN)) {

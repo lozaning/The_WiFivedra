@@ -15,68 +15,77 @@
 
 ## Connection Diagram
 
-### Serial Bus Topology
+### Daisy Chain Topology
 
-The system uses a multi-drop serial bus architecture. Multiple topologies are possible:
+The system uses a **direct UART daisy chain** architecture. Each ESP32 is connected directly to its immediate neighbors (left and right), forming a chain from the controller to the last subordinate.
 
-#### Option 1: RS-485 Multi-Drop Bus (Recommended)
-
-```
-                    ┌──────────────┐
-                    │  Controller  │
-                    │    ESP32     │
-                    └──────┬───────┘
-                           │
-                   ┌───────┴───────┐
-                   │   RS-485      │
-                   │  Transceiver  │
-                   └───────┬───────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   ┌────┴────┐        ┌────┴────┐       ┌────┴────┐
-   │ RS-485  │        │ RS-485  │  ...  │ RS-485  │
-   │  Trans  │        │  Trans  │       │  Trans  │
-   └────┬────┘        └────┬────┘       └────┬────┘
-        │                  │                  │
-   ┌────┴────┐        ┌────┴────┐       ┌────┴────┐
-   │  Sub 1  │        │  Sub 2  │  ...  │  Sub 48 │
-   │ ESP32-C5│        │ ESP32-C5│       │ ESP32-C5│
-   └─────────┘        └─────────┘       └─────────┘
-```
-
-**Components needed per device:**
-- MAX485 or equivalent RS-485 transceiver
-- 120Ω termination resistors at each end of the bus
-
-**Wiring:**
-- A (Data+): Yellow wire
-- B (Data-): Blue wire
-- GND: Black wire
-- DE/RE pins tied together and controlled by GPIO
-
-#### Option 2: Direct UART Daisy Chain
+**Benefits of this design:**
+- **Lower cost**: No RS-485 transceivers needed
+- **Simple wiring**: Just TX/RX connections between neighbors
+- **Bidirectional**: Messages flow down the chain, responses flow back up
+- **Automatic forwarding**: Each subordinate automatically forwards messages not addressed to it
 
 ```
-Controller ──TX──> Sub1 ──TX──> Sub2 ──TX──> ... ──TX──> Sub48
-    │              │             │                        │
-    └──RX──────────┴─────────────┴────────────────────────┘
+┌────────────┐       ┌─────────┐       ┌─────────┐             ┌─────────┐
+│ Controller │◄─────►│  Sub 1  │◄─────►│  Sub 2  │◄───...───►│  Sub 48 │
+│   ESP32    │       │ ESP32-C5│       │ ESP32-C5│             │ ESP32-C5│
+└────────────┘       └─────────┘       └─────────┘             └─────────┘
+  Downstream          Up | Down         Up | Down                Upstream
+  connection          |     |           |     |                  connection
+  only                |     |           |     |                  only
 ```
 
-**Note:** This requires each subordinate to forward messages. More complex firmware needed.
+**How it works:**
+1. **Controller → Subordinates**: Commands flow downstream (left to right)
+   - Controller sends to Sub1
+   - Sub1 processes if addressed to it, or forwards downstream to Sub2
+   - This continues until message reaches destination
 
-#### Option 3: Multiple UART Channels
+2. **Subordinates → Controller**: Responses flow upstream (right to left)
+   - Subordinate sends response upstream toward controller
+   - Each device forwards responses not addressed to it
+   - Response eventually reaches controller
 
-Use a controller with multiple UART channels or UART multiplexers to create separate buses for groups of subordinates.
+3. **No unnecessary forwarding**: Once a message reaches its destination, it stops there
+
+### Wiring Diagram
+
+**Controller to Sub1:**
+```
+Controller ESP32          Subordinate 1 ESP32-C5
+┌────────────┐           ┌──────────────┐
+│ GPIO 17 TX │──────────►│ GPIO 20 RX   │
+│ GPIO 16 RX │◄──────────│ GPIO 21 TX   │
+│ GND        │◄─────────►│ GND          │
+└────────────┘           └──────────────┘
+```
+
+**Sub N to Sub N+1 (all middle subordinates):**
+```
+Subordinate N ESP32-C5    Subordinate N+1 ESP32-C5
+┌──────────────┐         ┌──────────────┐
+│ GPIO 17 TX   │────────►│ GPIO 20 RX   │  (Downstream)
+│ GPIO 16 RX   │◄────────│ GPIO 21 TX   │  (Downstream)
+│ GND          │◄───────►│ GND          │
+└──────────────┘         └──────────────┘
+```
+
+**Important wiring notes:**
+- Each subordinate has TWO UART connections (except the last one):
+  - **Upstream** (GPIO 21 TX, GPIO 20 RX): Connects to previous device
+  - **Downstream** (GPIO 17 TX, GPIO 16 RX): Connects to next device
+- The **last subordinate** only has an upstream connection
+- TX on one device connects to RX on the other
+- **All devices must share a common ground**
 
 ## Pin Assignments
 
 ### Controller (ESP32)
 
 ```cpp
-// Serial Communication
-Serial1 TX  -> GPIO 17 (to RS-485 transceiver)
-Serial1 RX  -> GPIO 16 (from RS-485 transceiver)
+// Downstream Serial (to Sub1)
+Serial1 TX  -> GPIO 17 (to Sub1's RX pin 20)
+Serial1 RX  -> GPIO 16 (from Sub1's TX pin 21)
 
 // SD Card (SPI)
 MOSI -> GPIO 23
@@ -86,17 +95,28 @@ CS   -> GPIO 5
 
 // Indicators
 LED  -> GPIO 2
+
+// Debug/USB
+Serial (USB) -> For debug output and commands
 ```
 
 ### Subordinate (ESP32-C5)
 
 ```cpp
-// Serial Communication
-Serial TX -> GPIO 21 (to RS-485 transceiver)
-Serial RX -> GPIO 20 (from RS-485 transceiver)
+// Upstream Serial (to previous device / toward controller)
+Serial1 TX  -> GPIO 21 (to previous device's RX)
+Serial1 RX  -> GPIO 20 (from previous device's TX)
+
+// Downstream Serial (to next device / away from controller)
+Serial2 TX  -> GPIO 17 (to next device's RX pin 20)
+Serial2 RX  -> GPIO 16 (from next device's TX pin 21)
 
 // Indicators
 LED  -> GPIO 2
+
+// Notes:
+// - The LAST subordinate (#48) does not use downstream pins
+// - Set IS_LAST_NODE = true for the last device
 ```
 
 ## Software Setup
@@ -127,19 +147,26 @@ No external libraries required! The project uses only built-in ESP32 libraries:
 
 **IMPORTANT:** Each subordinate must have a unique address (1-48)
 
-Edit `subordinate/subordinate.ino` line 12:
+Edit `subordinate/subordinate.ino` lines 22-23:
 ```cpp
-#define MY_ADDRESS 1  // Change this for each device!
+#define MY_ADDRESS 1        // Change this for each device!
+#define IS_LAST_NODE false  // Set to true ONLY for the last subordinate
 ```
 
 You'll need to:
-1. Set `MY_ADDRESS` to 1
+1. Set `MY_ADDRESS` to 1, `IS_LAST_NODE` to false
 2. Upload to first subordinate
-3. Set `MY_ADDRESS` to 2
+3. Set `MY_ADDRESS` to 2, `IS_LAST_NODE` to false
 4. Upload to second subordinate
-5. Repeat for all 48 devices
+5. Repeat for subordinates 3-47
+6. **For the LAST device (#48)**: Set `MY_ADDRESS` to 48, `IS_LAST_NODE` to true
+7. Upload to the last subordinate
 
 **TIP:** Label each subordinate physically with its address!
+
+**Why IS_LAST_NODE matters:**
+- The last subordinate doesn't need to forward messages downstream
+- Setting this flag saves resources and prevents attempting to use a non-existent UART connection
 
 ### 5. Upload Controller Firmware
 
@@ -249,18 +276,28 @@ Modify `controller.ino` to split subordinates:
 
 ### No Subordinates Found
 
-1. Check serial bus wiring
+1. Check daisy chain wiring (TX to RX, RX to TX)
 2. Verify all devices share common ground
 3. Check baud rate matches (115200)
 4. Ensure subordinate addresses are set correctly
-5. Try testing one subordinate at a time
+5. Try testing one subordinate at a time (connect just Controller → Sub1)
+6. Verify IS_LAST_NODE is set correctly (true only for the last device)
 
 ### Garbled Serial Data
 
 1. Check for loose connections
-2. Reduce baud rate to 57600 if using long cables
-3. Add termination resistors on RS-485 bus
-4. Check for ground loops
+2. Verify TX/RX are not swapped
+3. Ensure common ground connection
+4. Check for voltage level issues (all should be 3.3V logic)
+5. Reduce baud rate to 57600 if using long cables (>2m between devices)
+
+### Only First Few Subordinates Respond
+
+1. Check downstream connections from last responding device
+2. Verify message forwarding is working (check serial output)
+3. Check power to devices further down the chain
+4. Ensure cable quality is good (signal degrades over long distances)
+5. Consider adding signal buffers if chain is very long (>10 devices)
 
 ### WiFi Scan Failures
 

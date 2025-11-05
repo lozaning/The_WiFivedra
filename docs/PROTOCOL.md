@@ -10,12 +10,39 @@ Current Version: **1**
 
 ## Physical Layer
 
-- **Interface**: UART Serial
+- **Interface**: UART Serial (Daisy Chain)
 - **Baud Rate**: 115200 bps
 - **Data Bits**: 8
 - **Parity**: None
 - **Stop Bits**: 1
 - **Flow Control**: None
+- **Topology**: Direct ESP32-to-ESP32 daisy chain (no RS-485 transceivers)
+
+### Network Topology
+
+The system uses a **daisy chain topology** where each device is connected to its immediate neighbors:
+
+```
+Controller <-> Sub1 <-> Sub2 <-> ... <-> Sub48
+```
+
+**Message Routing:**
+- **Commands (Controller → Subordinates)**: Flow downstream (toward higher addresses)
+  - Each subordinate receives all messages
+  - If addressed to it (or broadcast), processes the message
+  - If addressed to a higher numbered subordinate, forwards it downstream
+  - If addressed to the controller or lower numbered device, does NOT forward
+
+- **Responses (Subordinates → Controller)**: Flow upstream (toward lower addresses)
+  - Subordinate sends response upstream
+  - Each device forwards responses not addressed to it toward the controller
+  - Response stops when it reaches the destination
+
+**Key behaviors:**
+- Messages automatically stop at their destination (no unnecessary forwarding)
+- Each subordinate acts as both an endpoint and a router
+- Broadcast messages (0xFF) are processed by all devices but not re-forwarded
+- Message forwarding is transparent - applications don't need to handle routing
 
 ## Packet Structure
 
