@@ -15,59 +15,58 @@
 
 ## Connection Diagram
 
-### Serial Bus Topology
+### UART Daisy Chain Topology
 
-The system uses a multi-drop serial bus architecture. Multiple topologies are possible:
-
-#### Option 1: RS-485 Multi-Drop Bus (Recommended)
+The system uses a UART daisy chain architecture where subordinates are connected in series:
 
 ```
-                    ┌──────────────┐
-                    │  Controller  │
-                    │    ESP32     │
-                    └──────┬───────┘
-                           │
-                   ┌───────┴───────┐
-                   │   RS-485      │
-                   │  Transceiver  │
-                   └───────┬───────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   ┌────┴────┐        ┌────┴────┐       ┌────┴────┐
-   │ RS-485  │        │ RS-485  │  ...  │ RS-485  │
-   │  Trans  │        │  Trans  │       │  Trans  │
-   └────┬────┘        └────┬────┘       └────┬────┘
-        │                  │                  │
-   ┌────┴────┐        ┌────┴────┐       ┌────┴────┐
-   │  Sub 1  │        │  Sub 2  │  ...  │  Sub 48 │
-   │ ESP32-C5│        │ ESP32-C5│       │ ESP32-C5│
-   └─────────┘        └─────────┘       └─────────┘
+┌──────────────┐
+│  Controller  │
+│    ESP32     │
+└──┬────────┬──┘
+   │ TX     │ RX
+   │        │
+   │        └──────────────────────────────────────────────────┐
+   │                                                            │
+   └────────────┐                                              │
+                │                                              │
+           ┌────▼────┐                                         │
+           │  Sub 1  │                                         │
+           │ ESP32-C5│                                         │
+           └──┬────┬─┘                                         │
+              │ TX │ RX                                        │
+              │    │                                           │
+              │    └─────────────────────────────┐             │
+              └────────────┐                     │             │
+                           │                     │             │
+                      ┌────▼────┐                │             │
+                      │  Sub 2  │                │             │
+                      │ ESP32-C5│                │             │
+                      └──┬────┬─┘                │             │
+                         │ TX │ RX               │             │
+                         │    │                  │             │
+                        ...  ...                 │             │
+                         │    │                  │             │
+                      ┌──▼────┴──┐               │             │
+                      │  Sub 48  │               │             │
+                      │ ESP32-C5 ├───────────────┘             │
+                      └──────────┘ TX ───────────────────────┘
+                           (RX unused)
 ```
-
-**Components needed per device:**
-- MAX485 or equivalent RS-485 transceiver
-- 120Ω termination resistors at each end of the bus
 
 **Wiring:**
-- A (Data+): Yellow wire
-- B (Data-): Blue wire
-- GND: Black wire
-- DE/RE pins tied together and controlled by GPIO
+- Controller TX -> Sub1 RX
+- Sub1 TX -> Sub2 RX
+- Sub2 TX -> Sub3 RX
+- ...
+- Sub48 TX -> Controller RX
+- Common GND between all devices
 
-#### Option 2: Direct UART Daisy Chain
-
-```
-Controller ──TX──> Sub1 ──TX──> Sub2 ──TX──> ... ──TX──> Sub48
-    │              │             │                        │
-    └──RX──────────┴─────────────┴────────────────────────┘
-```
-
-**Note:** This requires each subordinate to forward messages. More complex firmware needed.
-
-#### Option 3: Multiple UART Channels
-
-Use a controller with multiple UART channels or UART multiplexers to create separate buses for groups of subordinates.
+**Key Points:**
+- Each subordinate receives on RX and forwards on TX
+- Last subordinate (Sub48) TX connects back to Controller RX
+- Simple 3-wire connection: TX, RX, GND
+- No additional components needed
 
 ## Pin Assignments
 
@@ -75,8 +74,8 @@ Use a controller with multiple UART channels or UART multiplexers to create sepa
 
 ```cpp
 // Serial Communication
-Serial1 TX  -> GPIO 17 (to RS-485 transceiver)
-Serial1 RX  -> GPIO 16 (from RS-485 transceiver)
+Serial1 TX  -> GPIO 17 (to Sub1 RX)
+Serial1 RX  -> GPIO 16 (from Sub48 TX)
 
 // SD Card (SPI)
 MOSI -> GPIO 23
@@ -91,13 +90,15 @@ LED  -> GPIO 2
 ### Subordinate (ESP32-C5)
 
 ```cpp
-// Serial Communication
-Serial TX -> GPIO 21 (to RS-485 transceiver)
-Serial RX -> GPIO 20 (from RS-485 transceiver)
+// Serial Communication - Daisy Chain
+Serial RX  -> GPIO 20 (from previous device TX)
+Serial1 TX -> GPIO 21 (to next device RX)
 
 // Indicators
 LED  -> GPIO 2
 ```
+
+Note: Subordinates use Serial (default UART) for receiving and Serial1 for forwarding to maintain independent buffers.
 
 ## Software Setup
 
@@ -258,9 +259,10 @@ Modify `controller.ino` to split subordinates:
 ### Garbled Serial Data
 
 1. Check for loose connections
-2. Reduce baud rate to 57600 if using long cables
-3. Add termination resistors on RS-485 bus
-4. Check for ground loops
+2. Verify TX/RX are not swapped
+3. Reduce baud rate to 57600 if using long cables
+4. Check for common ground between all devices
+5. Keep wire runs short and away from power cables
 
 ### WiFi Scan Failures
 

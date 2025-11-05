@@ -5,7 +5,9 @@
  * across all 2.4GHz and 5GHz channels.
  *
  * Hardware: ESP32 (main controller)
- * Communication: Serial bus to subordinates
+ * Communication: UART daisy chain to subordinates
+ *   - Serial1 TX -> Sub1 RX (start of chain)
+ *   - Serial1 RX <- Sub48 TX (end of chain)
  */
 
 #include "../common/protocol_defs.h"
@@ -17,8 +19,8 @@
 #define SD_CS_PIN 5
 #define LED_PIN 2
 
-// Serial ports for subordinate communication
-// Using Serial1 for subordinates (can expand to multiple UART if needed)
+// Serial communication for daisy chain
+// Serial1 TX/RX connects to first and last subordinates in chain
 SerialProtocol protocol(&Serial1, CONTROLLER_ADDRESS);
 
 // Subordinate tracking

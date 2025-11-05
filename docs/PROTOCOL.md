@@ -4,6 +4,21 @@
 
 The WiFivedra serial protocol enables communication between a controller ESP32 and up to 48 subordinate ESP32-C5 devices for comprehensive WiFi scanning across all 2.4GHz and 5GHz channels.
 
+## Network Topology
+
+The system uses a UART daisy chain architecture:
+
+```
+Controller TX --> Sub1 --> Sub2 --> ... --> Sub48 --> Controller RX
+```
+
+Key characteristics:
+- Controller sends commands via TX to first subordinate
+- Each subordinate forwards packets not addressed to it
+- Responses travel through the chain back to controller RX
+- Simple 3-wire connection (TX, RX, GND) between each device
+- No external transceivers or termination resistors required
+
 ## Protocol Version
 
 Current Version: **1**

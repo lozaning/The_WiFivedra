@@ -24,16 +24,28 @@ The WiFivedra is the second generation WiFi monitoring device featuring 48 ESP32
 │  - Aggregates scan results                          │
 │  - Logs data to SD card                             │
 └──────────────────┬──────────────────────────────────┘
-                   │
-            Serial Bus (RS-485)
-                   │
-    ┌──────────────┼──────────────┐
-    │              │              │
-┌───▼────┐    ┌───▼────┐    ┌───▼────┐
-│ Sub 1  │    │ Sub 2  │... │ Sub 48 │
-│ESP32-C5│    │ESP32-C5│    │ESP32-C5│
-│ Ch 36  │    │ Ch 40  │    │ Ch 165 │
-└────────┘    └────────┘    └────────┘
+                   │ UART Daisy Chain
+                   │ TX ──────────────────────────┐
+                   │                              │
+                   │ RX ◄─────────────────────────┼─┐
+                   ▼                              │ │
+              ┌─────────┐ TX                      │ │
+              │  Sub 1  ├──────────────┐          │ │
+              │ESP32-C5 │              │          │ │
+              │ Ch 36   │ RX ◄─────────┼──────────┘ │
+              └─────────┘              │            │
+                                       ▼            │
+                                  ┌─────────┐ TX    │
+                                  │  Sub 2  ├───────┤
+                                  │ESP32-C5 │       │
+                                  │ Ch 40   │ RX ◄──┤
+                                  └─────────┘       │
+                                       ...          │
+                                  ┌─────────┐ TX    │
+                                  │ Sub 48  ├───────┘
+                                  │ESP32-C5 │
+                                  │ Ch 165  │ RX (unused)
+                                  └─────────┘
 ```
 
 ## Quick Start
@@ -61,11 +73,13 @@ The_WiFivedra/
 
 ## Serial Protocol
 
-The system uses a custom serial protocol at 115200 baud with structured packets:
+The system uses a UART daisy chain topology with custom packet-based protocol at 115200 baud:
 
+- **Topology**: Controller TX -> Sub1 -> Sub2 -> ... -> Sub48 -> Controller RX
 - **Packet Format**: Header (8 bytes) + Payload (0-502 bytes) + Footer (2 bytes)
 - **Commands**: 11 command types (ping, scan control, configuration, etc.)
 - **Responses**: Status updates, scan results, acknowledgments
+- **Forwarding**: Each subordinate forwards packets not addressed to it
 - **Error Handling**: Checksums, timeouts, retry logic
 
 See [docs/PROTOCOL.md](docs/PROTOCOL.md) for complete protocol specification.
@@ -110,8 +124,7 @@ Each subordinate is automatically assigned a specific channel:
 
 ### Subordinates
 - 48x ESP32-C5 development boards
-- RS-485 transceivers (MAX485 or similar)
-- Serial bus wiring
+- UART wiring (TX/RX/GND between devices)
 - Power distribution system (~32W peak)
 
 ## Software Requirements

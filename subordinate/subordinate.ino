@@ -1,10 +1,13 @@
 /**
- * WiFivedra Subordinate Firmware
+ * WiFivedra Subordinate Firmware - Daisy Chain Edition
  *
  * Performs WiFi scanning on assigned channels and reports results to controller.
+ * Forwards packets not addressed to this device to the next subordinate.
  *
  * Hardware: ESP32-C5
- * Communication: Serial to controller
+ * Communication: UART Daisy Chain
+ *   - Serial (RX): Receives from previous device
+ *   - Serial1 (TX): Forwards to next device
  */
 
 #include "../common/protocol_defs.h"
@@ -18,7 +21,10 @@
 #define LED_PIN 2
 
 // Serial communication
-SerialProtocol protocol(&Serial, MY_ADDRESS);
+// RX from previous device (or controller)
+SerialProtocol rxProtocol(&Serial, MY_ADDRESS);
+// TX to next device (or controller)
+SerialProtocol txProtocol(&Serial1, MY_ADDRESS);
 
 // Scan parameters
 ScanParams scanParams = {
@@ -57,8 +63,12 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   bootTime = millis();
 
-  // Initialize serial protocol
-  protocol.begin(SERIAL_BAUD_RATE);
+  // Initialize serial ports
+  // Serial (RX): from previous device - GPIO 20
+  rxProtocol.begin(SERIAL_BAUD_RATE);
+
+  // Serial1 (TX): to next device - GPIO 21
+  Serial1.begin(SERIAL_BAUD_RATE, SERIAL_8N1, -1, 21);  // RX disabled, TX on GPIO 21
 
   // Set WiFi to station mode
   WiFi.mode(WIFI_STA);
@@ -72,10 +82,17 @@ void setup() {
 }
 
 void loop() {
-  // Handle incoming commands
+  // Handle incoming packets
   Packet packet;
-  if (protocol.receivePacket(packet)) {
-    handleCommand(packet);
+  if (rxProtocol.receivePacket(packet)) {
+    // Check if packet is for us
+    if (packet.header.destAddr == MY_ADDRESS || packet.header.destAddr == 0xFF) {
+      // Packet is for us, handle it
+      handleCommand(packet);
+    } else {
+      // Packet is for another device, forward it
+      forwardPacket(packet);
+    }
   }
 
   // Perform scanning if active
@@ -102,12 +119,18 @@ void loop() {
   delay(1);
 }
 
+void forwardPacket(Packet& packet) {
+  // Forward the packet to the next device in the chain
+  txProtocol.sendPacket(packet.header.destAddr, packet.header.type,
+                        packet.payload, packet.header.length);
+}
+
 void handleCommand(Packet& packet) {
   CommandType cmd = (CommandType)packet.header.type;
 
   switch (cmd) {
     case CMD_PING:
-      protocol.sendAck(CONTROLLER_ADDRESS);
+      txProtocol.sendAck(CONTROLLER_ADDRESS);
       break;
 
     case CMD_SET_SCAN_PARAMS:
@@ -115,9 +138,9 @@ void handleCommand(Packet& packet) {
         memcpy(&scanParams, packet.payload, sizeof(ScanParams));
         status.channel = scanParams.channel;
         status.band = scanParams.band;
-        protocol.sendAck(CONTROLLER_ADDRESS);
+        txProtocol.sendAck(CONTROLLER_ADDRESS);
       } else {
-        protocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
+        txProtocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
       }
       break;
 
@@ -126,29 +149,29 @@ void handleCommand(Packet& packet) {
         scanningActive = true;
         status.state = STATE_SCANNING;
         lastScanTime = 0; // Trigger immediate scan
-        protocol.sendAck(CONTROLLER_ADDRESS);
+        txProtocol.sendAck(CONTROLLER_ADDRESS);
       } else {
-        protocol.sendNack(CONTROLLER_ADDRESS, ERR_BUSY);
+        txProtocol.sendNack(CONTROLLER_ADDRESS, ERR_BUSY);
       }
       break;
 
     case CMD_STOP_SCAN:
       scanningActive = false;
       status.state = STATE_IDLE;
-      protocol.sendAck(CONTROLLER_ADDRESS);
+      txProtocol.sendAck(CONTROLLER_ADDRESS);
       break;
 
     case CMD_GET_STATUS:
-      protocol.sendResponse(CONTROLLER_ADDRESS, RESP_STATUS, &status, sizeof(status));
+      txProtocol.sendResponse(CONTROLLER_ADDRESS, RESP_STATUS, &status, sizeof(status));
       break;
 
     case CMD_SET_CHANNEL:
       if (packet.header.length >= 1) {
         scanParams.channel = packet.payload[0];
         status.channel = scanParams.channel;
-        protocol.sendAck(CONTROLLER_ADDRESS);
+        txProtocol.sendAck(CONTROLLER_ADDRESS);
       } else {
-        protocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
+        txProtocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
       }
       break;
 
@@ -159,35 +182,35 @@ void handleCommand(Packet& packet) {
     case CMD_CLEAR_RESULTS:
       resultBufferCount = 0;
       status.resultCount = 0;
-      protocol.sendAck(CONTROLLER_ADDRESS);
+      txProtocol.sendAck(CONTROLLER_ADDRESS);
       break;
 
     case CMD_SET_SCAN_MODE:
       if (packet.header.length >= 1) {
         scanParams.scanMode = (ScanMode)packet.payload[0];
-        protocol.sendAck(CONTROLLER_ADDRESS);
+        txProtocol.sendAck(CONTROLLER_ADDRESS);
       } else {
-        protocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
+        txProtocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
       }
       break;
 
     case CMD_SET_SCAN_INTERVAL:
       if (packet.header.length >= 2) {
         memcpy(&scanParams.intervalMs, packet.payload, 2);
-        protocol.sendAck(CONTROLLER_ADDRESS);
+        txProtocol.sendAck(CONTROLLER_ADDRESS);
       } else {
-        protocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
+        txProtocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
       }
       break;
 
     case CMD_RESET:
-      protocol.sendAck(CONTROLLER_ADDRESS);
+      txProtocol.sendAck(CONTROLLER_ADDRESS);
       delay(100);
       ESP.restart();
       break;
 
     default:
-      protocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_COMMAND);
+      txProtocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_COMMAND);
       break;
   }
 }
@@ -247,7 +270,7 @@ void performScan() {
     }
 
     // Send result immediately to controller
-    protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_RESULT, &result, sizeof(result));
+    txProtocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_RESULT, &result, sizeof(result));
 
     // Also buffer if there's space
     if (resultBufferCount < MAX_RESULT_BUFFER) {
@@ -263,16 +286,16 @@ void performScan() {
   WiFi.scanDelete();
 
   // Send scan complete notification
-  protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_COMPLETE, nullptr, 0);
+  txProtocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_COMPLETE, nullptr, 0);
 
   status.state = STATE_IDLE;
 }
 
 void sendBufferedResults() {
   for (uint16_t i = 0; i < resultBufferCount; i++) {
-    protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_RESULT,
+    txProtocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_RESULT,
                          &resultBuffer[i], sizeof(WiFiScanResult));
     delay(5);
   }
-  protocol.sendAck(CONTROLLER_ADDRESS);
+  txProtocol.sendAck(CONTROLLER_ADDRESS);
 }
