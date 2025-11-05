@@ -77,6 +77,20 @@ unsigned long lastGPSBroadcast = 0;
 #define GPS_BROADCAST_INTERVAL_MS 1000  // Broadcast GPS every 1 second
 String nmeaBuffer = "";  // Buffer for NMEA sentence parsing
 
+// GPS time tracking for absolute timestamps
+struct GPSTime {
+  uint8_t hour;
+  uint8_t minute;
+  uint8_t second;
+  uint16_t millisecond;
+  uint32_t referenceMillis;  // millis() when GPS time was captured
+  bool valid;
+};
+GPSTime gpsTime = {0, 0, 0, 0, 0, false};
+
+// Wardriving session tracking
+uint16_t currentSessionNumber = 0;
+
 // State machine
 enum ControllerState {
   CTRL_INIT,
@@ -410,13 +424,23 @@ void logScanResult(uint8_t subAddr, WiFiScanResult& result) {
     createNewLogFile();
   }
 
-  // CSV format: timestamp,sub_addr,bssid,ssid,rssi,channel,band,auth,latitude,longitude,altitude,gps_quality
-  logFile.printf("%lu,%d,%02X:%02X:%02X:%02X:%02X:%02X,\"%s\",%d,%d,%d,%d,%.8f,%.8f,%.2f,%d\n",
-                 result.timestamp, subAddr,
+  // WiGLE CSV format: MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type
+  String timestamp = timestampToISO8601(result.timestamp);
+  const char* authMode = authModeToWiGLE(result.authMode);
+  float accuracy = getGPSAccuracy(result.gpsQuality);
+
+  logFile.printf("%02X:%02X:%02X:%02X:%02X:%02X,%s,%s,%s,%d,%d,%.8f,%.8f,%.2f,%.1f,WIFI\n",
                  result.bssid[0], result.bssid[1], result.bssid[2],
                  result.bssid[3], result.bssid[4], result.bssid[5],
-                 result.ssid, result.rssi, result.channel, result.band, result.authMode,
-                 result.latitude, result.longitude, result.altitude, result.gpsQuality);
+                 result.ssid,
+                 authMode,
+                 timestamp.c_str(),
+                 result.channel,
+                 result.rssi,
+                 result.latitude,
+                 result.longitude,
+                 result.altitude,
+                 accuracy);
 
   // Periodic flush
   static uint32_t flushCounter = 0;
@@ -426,15 +450,20 @@ void logScanResult(uint8_t subAddr, WiFiScanResult& result) {
 }
 
 void createNewLogFile() {
+  // Use session number if not already set
+  if (currentSessionNumber == 0) {
+    currentSessionNumber = findNextSessionNumber();
+  }
+
   char filename[32];
-  snprintf(filename, sizeof(filename), "/wardrive_%lu.csv", millis());
+  snprintf(filename, sizeof(filename), "/wigle_%04d.csv", currentSessionNumber);
 
   logFile = SD.open(filename, FILE_WRITE);
   if (logFile) {
-    // Write CSV header
-    logFile.println("timestamp,sub_addr,bssid,ssid,rssi,channel,band,auth,latitude,longitude,altitude,gps_quality");
+    // Write WiGLE CSV header
+    logFile.println("MAC,SSID,AuthMode,FirstSeen,Channel,RSSI,CurrentLatitude,CurrentLongitude,AltitudeMeters,AccuracyMeters,Type");
     logFile.flush();
-    Serial.printf("Created log file: %s\n", filename);
+    Serial.printf("Created WiGLE log file: %s\n", filename);
   }
 }
 
@@ -530,6 +559,9 @@ void parseNMEA(String sentence) {
     }
 
     if (count >= 9) {
+      // Parse time (HHMMSS.sss format)
+      String timeStr = sentence.substring(idx[0], idx[1] - 1);
+
       // Parse latitude
       String latStr = sentence.substring(idx[1], idx[2] - 1);
       String latDir = sentence.substring(idx[2], idx[3] - 1);
@@ -546,6 +578,20 @@ void parseNMEA(String sentence) {
 
       // Parse altitude
       String altStr = sentence.substring(idx[8], idx[9] - 1);
+
+      // Parse GPS time if available
+      if (timeStr.length() >= 6) {
+        gpsTime.hour = timeStr.substring(0, 2).toInt();
+        gpsTime.minute = timeStr.substring(2, 4).toInt();
+        gpsTime.second = timeStr.substring(4, 6).toInt();
+        if (timeStr.length() > 7 && timeStr.indexOf('.') > 0) {
+          gpsTime.millisecond = timeStr.substring(7).toInt();
+        } else {
+          gpsTime.millisecond = 0;
+        }
+        gpsTime.referenceMillis = millis();
+        gpsTime.valid = true;
+      }
 
       if (latStr.length() > 0 && lonStr.length() > 0) {
         // Convert NMEA format (DDMM.MMMM) to decimal degrees
@@ -572,4 +618,105 @@ void broadcastGPS() {
     // Broadcast to all subordinates (address 0xFF = broadcast)
     protocol.sendCommand(0xFF, CMD_GPS_UPDATE, &currentGPS, sizeof(GPSPosition));
   }
+}
+
+// Convert timestamp from millis() to ISO 8601 format using GPS time reference
+// Returns format: YYYY-MM-DD HH:MM:SS
+String timestampToISO8601(uint32_t timestamp) {
+  if (!gpsTime.valid) {
+    // No GPS time available, return placeholder
+    return "0000-00-00 00:00:00";
+  }
+
+  // Calculate elapsed time since GPS time reference
+  uint32_t elapsedMs = timestamp - gpsTime.referenceMillis;
+
+  // Calculate total seconds from GPS time + elapsed time
+  uint32_t totalSeconds = gpsTime.hour * 3600 + gpsTime.minute * 60 + gpsTime.second + (elapsedMs / 1000);
+
+  // Calculate time components (note: this doesn't handle day overflow)
+  uint8_t hours = (totalSeconds / 3600) % 24;
+  uint8_t minutes = (totalSeconds / 60) % 60;
+  uint8_t seconds = totalSeconds % 60;
+
+  // Format as ISO 8601 (without date since GPS doesn't provide it in GGA)
+  // Using a placeholder date - user should ideally set this or use RMC sentence
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "2024-01-01 %02d:%02d:%02d", hours, minutes, seconds);
+  return String(buffer);
+}
+
+// Convert ESP32 WiFi auth mode to WiGLE format string
+const char* authModeToWiGLE(uint8_t authMode) {
+  switch (authMode) {
+    case 0:  // WIFI_AUTH_OPEN
+      return "[Open]";
+    case 1:  // WIFI_AUTH_WEP
+      return "[WEP]";
+    case 2:  // WIFI_AUTH_WPA_PSK
+      return "[WPA]";
+    case 3:  // WIFI_AUTH_WPA2_PSK
+      return "[WPA2]";
+    case 4:  // WIFI_AUTH_WPA_WPA2_PSK
+      return "[WPA2]";
+    case 5:  // WIFI_AUTH_WPA2_ENTERPRISE
+      return "[WPA2-EAP]";
+    case 6:  // WIFI_AUTH_WPA3_PSK
+      return "[WPA3]";
+    case 7:  // WIFI_AUTH_WPA2_WPA3_PSK
+      return "[WPA3]";
+    case 8:  // WIFI_AUTH_WAPI_PSK
+      return "[WAPI]";
+    default:
+      return "[Unknown]";
+  }
+}
+
+// Get GPS accuracy in meters based on fix quality
+float getGPSAccuracy(uint8_t gpsQuality) {
+  switch (gpsQuality) {
+    case 0:  // No fix
+      return 0.0;
+    case 1:  // GPS fix
+      return 15.0;
+    case 2:  // DGPS fix
+      return 3.0;
+    default:
+      return 0.0;
+  }
+}
+
+// Find next available session number by scanning SD card
+uint16_t findNextSessionNumber() {
+  uint16_t maxSession = 0;
+  File root = SD.open("/");
+
+  if (!root) {
+    return 1;
+  }
+
+  File file = root.openNextFile();
+  while (file) {
+    String filename = String(file.name());
+
+    // Look for files matching pattern: wigle_NNNN.csv
+    if (filename.startsWith("wigle_") && filename.endsWith(".csv")) {
+      // Extract session number
+      int startIdx = 6;  // Length of "wigle_"
+      int endIdx = filename.indexOf(".csv");
+      if (endIdx > startIdx) {
+        String numberStr = filename.substring(startIdx, endIdx);
+        uint16_t sessionNum = numberStr.toInt();
+        if (sessionNum > maxSession) {
+          maxSession = sessionNum;
+        }
+      }
+    }
+
+    file.close();
+    file = root.openNextFile();
+  }
+
+  root.close();
+  return maxSession + 1;
 }
