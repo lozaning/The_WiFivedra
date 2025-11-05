@@ -143,30 +143,32 @@ No external libraries required! The project uses only built-in ESP32 libraries:
 - SD.h (built-in)
 - SPI.h (built-in)
 
-### 4. Configure Subordinate Addresses
+### 4. Flash Subordinate Firmware
 
-**IMPORTANT:** Each subordinate must have a unique address (1-48)
+**GREAT NEWS:** All subordinates can use identical firmware! The system supports up to 52 subordinates.
 
-Edit `subordinate/subordinate.ino` lines 22-23:
-```cpp
-#define MY_ADDRESS 1        // Change this for each device!
-#define IS_LAST_NODE false  // Set to true ONLY for the last subordinate
-```
+The subordinate firmware includes **auto-discovery**:
+- All devices boot with an unassigned address
+- The controller automatically assigns addresses (1, 2, 3, ...)  via the daisy chain
+- The last device in the chain automatically detects it's the last node
+- No manual configuration needed!
 
-You'll need to:
-1. Set `MY_ADDRESS` to 1, `IS_LAST_NODE` to false
-2. Upload to first subordinate
-3. Set `MY_ADDRESS` to 2, `IS_LAST_NODE` to false
-4. Upload to second subordinate
-5. Repeat for subordinates 3-47
-6. **For the LAST device (#48)**: Set `MY_ADDRESS` to 48, `IS_LAST_NODE` to true
-7. Upload to the last subordinate
+**Steps:**
+1. Open `subordinate/subordinate.ino` in Arduino IDE
+2. Select Tools → Board → "ESP32-C5 Dev Module"
+3. Select Tools → Port → (your COM port)
+4. Click Upload
+5. **Repeat for ALL subordinates** - the firmware is identical!
 
-**TIP:** Label each subordinate physically with its address!
+**LED Indicators during startup:**
+- **Very fast blink (100ms)**: Waiting for address assignment
+- **Slow blink (1s)**: Address assigned, idle
+- **Medium blink (200ms)**: Scanning active
 
-**Why IS_LAST_NODE matters:**
-- The last subordinate doesn't need to forward messages downstream
-- Setting this flag saves resources and prevents attempting to use a non-existent UART connection
+**Physical arrangement:**
+- The subordinates will be numbered in order from controller: Sub1, Sub2, Sub3, etc.
+- The physical order in the daisy chain determines the address
+- Label devices AFTER auto-discovery completes
 
 ### 5. Upload Controller Firmware
 
@@ -217,71 +219,120 @@ Total system power (all 48 subordinates scanning):
 
 ## Initial Testing
 
-### 1. Test Controller
+### 1. Test Controller (Without Subordinates)
 
 1. Connect controller to USB
 2. Open Serial Monitor (115200 baud)
 3. You should see:
    ```
    === WiFivedra Controller ===
+   Daisy Chain Mode
    Initializing...
-   Serial protocol initialized
+   Serial protocol initialized (daisy chain)
    SD card initialized
+
+   --- Auto-Discovering Subordinates ---
+   Assigning addresses via daisy chain...
    ```
-4. Type `help` to see available commands
+4. After 10 seconds (no subordinates connected):
+   ```
+   --- Auto-Discovery Complete ---
+   Total subordinates discovered: 0
+   ```
+5. Type `help` to see available commands
 
 ### 2. Test Single Subordinate
 
-1. Connect one subordinate to the serial bus
-2. Set its address to 1
-3. On controller serial monitor, type: `discover`
-4. You should see:
+1. **Power off the controller**
+2. Wire the first subordinate to the controller (Controller GPIO17 TX → Sub GPIO20 RX, Controller GPIO16 RX ← Sub GPIO21 TX, GND ← → GND)
+3. **Power on both devices**
+4. Watch the controller serial monitor:
    ```
-   --- Discovering Subordinates ---
-   Sub 1: ONLINE
-   Total: 1/48 online
+   --- Auto-Discovering Subordinates ---
+   Assigning addresses via daisy chain...
+   Subordinate #1 registered (LAST NODE)
+
+   --- Auto-Discovery Complete ---
+   Total subordinates discovered: 1
+   Last subordinate in chain: #1
    ```
+5. The subordinate's LED should change from very fast blink to slow blink
 
-### 3. Test Scanning
+### 3. Test Daisy Chain
 
-1. Type: `config` to configure the subordinate
+1. **Power off all devices**
+2. Wire the second subordinate between Sub1 and ground (Sub1 GPIO17 TX → Sub2 GPIO20 RX, Sub1 GPIO16 RX ← Sub2 GPIO21 TX, GND)
+3. **Power on all devices**
+4. Watch auto-discovery:
+   ```
+   Subordinate #1 registered
+   Subordinate #2 registered (LAST NODE)
+
+   --- Auto-Discovery Complete ---
+   Total subordinates discovered: 2
+   Last subordinate in chain: #2
+   ```
+5. Both subordinates should now have slow-blinking LEDs
+
+### 4. Test Scanning
+
+1. Type: `config` to configure subordinates
 2. Type: `start` to begin scanning
 3. You should see WiFi networks being detected:
    ```
    [Sub01 Ch036] AA:BB:CC:DD:EE:FF | MyNetwork | RSSI: -45 dBm
+   [Sub02 Ch040] BB:CC:DD:EE:FF:00 | AnotherNet | RSSI: -52 dBm
    ```
 
-### 4. Add More Subordinates
+### 5. Add More Subordinates
 
-1. Connect additional subordinates one at a time
-2. Verify each comes online with `discover`
-3. Once all are connected, start scanning with `start`
+1. **Power off all devices**
+2. Wire additional subordinates in the chain
+3. **Power on and watch auto-discovery**
+4. Each subordinate will be assigned the next sequential address
+5. The last physical device in the chain will be detected as the last node
 
 ## Channel Assignment Strategy
 
 The system automatically assigns channels based on subordinate ID:
 
-### For 5GHz Coverage (48 subordinates)
+### For 5GHz Coverage (52 subordinates)
 
-- Subs 1-25: Assigned to individual 5GHz channels
-- Subs 26-48: Can be configured for additional coverage or 2.4GHz
+There are 25 unique 5GHz channels available. With 52 subordinates:
+- Subs 1-25: First pass through all 5GHz channels
+- Subs 26-50: Second pass through all 5GHz channels (double coverage)
+- Subs 51-52: Third pass starts (channels 36, 40)
+
+This provides **double coverage** of all 5GHz channels for better detection accuracy.
 
 ### For Mixed Band Coverage
 
 Modify `controller.ino` to split subordinates:
 - Subs 1-13: 2.4GHz channels 1-13
-- Subs 14-48: 5GHz channels
+- Subs 14-52: 5GHz channels (cycling through all 25 channels)
 
 ## Troubleshooting
 
-### No Subordinates Found
+### Auto-Discovery Issues
 
-1. Check daisy chain wiring (TX to RX, RX to TX)
-2. Verify all devices share common ground
-3. Check baud rate matches (115200)
-4. Ensure subordinate addresses are set correctly
-5. Try testing one subordinate at a time (connect just Controller → Sub1)
-6. Verify IS_LAST_NODE is set correctly (true only for the last device)
+**No subordinates discovered:**
+1. Check that all devices are powered on
+2. Verify daisy chain wiring (TX to RX, RX to TX)
+3. Ensure all devices share common ground
+4. Check subordinate LEDs - should blink very fast (100ms) when waiting for address
+5. Try with just one subordinate first
+6. Power cycle all devices (auto-discovery runs on startup)
+
+**Some subordinates not discovered:**
+1. Check wiring of the last discovered device and the next one
+2. Verify power to all devices in the chain
+3. The problem is likely between the last discovered device and the next
+4. Try running `autodiscover` command again from controller
+
+**Wrong number of subordinates:**
+1. One or more subordinates may not have firmware uploaded
+2. Check that all subordinates are powered
+3. Verify serial connections throughout the chain
 
 ### Garbled Serial Data
 

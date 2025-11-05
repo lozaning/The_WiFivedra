@@ -2,7 +2,7 @@
 
 ## Overview
 
-The WiFivedra serial protocol enables communication between a controller ESP32 and up to 48 subordinate ESP32-C5 devices for comprehensive WiFi scanning across all 2.4GHz and 5GHz channels.
+The WiFivedra serial protocol enables communication between a controller ESP32 and up to 52 subordinate ESP32-C5 devices for comprehensive WiFi scanning across all 2.4GHz and 5GHz channels. The protocol includes automatic address assignment via daisy chain discovery.
 
 ## Protocol Version
 
@@ -23,7 +23,7 @@ Current Version: **1**
 The system uses a **daisy chain topology** where each device is connected to its immediate neighbors:
 
 ```
-Controller <-> Sub1 <-> Sub2 <-> ... <-> Sub48
+Controller <-> Sub1 <-> Sub2 <-> ... <-> Sub52
 ```
 
 **Message Routing:**
@@ -81,37 +81,58 @@ Variable length data specific to the command or response.
 ### Addressing
 
 - **0x00**: Controller (master)
-- **0x01-0x30**: Subordinates 1-48
+- **0x01-0x34**: Subordinates 1-52 (auto-assigned during discovery)
+- **0xFE**: Unassigned device (used during auto-discovery phase)
 - **0xFF**: Broadcast to all devices
 
 ## Command Types (Controller → Subordinate)
 
-| Code | Command              | Description                          | Payload                |
-|------|---------------------|--------------------------------------|------------------------|
-| 0x01 | CMD_PING            | Test connectivity                    | None                   |
-| 0x10 | CMD_SET_SCAN_PARAMS | Configure scan parameters            | ScanParams (9 bytes)   |
-| 0x11 | CMD_START_SCAN      | Start WiFi scanning                  | None                   |
-| 0x12 | CMD_STOP_SCAN       | Stop WiFi scanning                   | None                   |
-| 0x13 | CMD_GET_STATUS      | Request status information           | None                   |
-| 0x14 | CMD_SET_CHANNEL     | Set specific channel                 | uint8_t channel        |
-| 0x15 | CMD_GET_SCAN_RESULTS| Request buffered scan results        | None                   |
-| 0x16 | CMD_CLEAR_RESULTS   | Clear result buffer                  | None                   |
-| 0x17 | CMD_SET_SCAN_MODE   | Set scan mode (active/passive)       | uint8_t mode           |
-| 0x18 | CMD_SET_SCAN_INTERVAL| Set scan interval                   | uint16_t interval_ms   |
-| 0xFF | CMD_RESET           | Reset subordinate                    | None                   |
+| Code | Command              | Description                          | Payload                    |
+|------|---------------------|--------------------------------------|----------------------------|
+| 0x01 | CMD_PING            | Test connectivity                    | None                       |
+| 0x02 | CMD_ASSIGN_ADDRESS  | Auto-discovery address assignment    | AddressAssignment (2 bytes)|
+| 0x10 | CMD_SET_SCAN_PARAMS | Configure scan parameters            | ScanParams (9 bytes)       |
+| 0x11 | CMD_START_SCAN      | Start WiFi scanning                  | None                       |
+| 0x12 | CMD_STOP_SCAN       | Stop WiFi scanning                   | None                       |
+| 0x13 | CMD_GET_STATUS      | Request status information           | None                       |
+| 0x14 | CMD_SET_CHANNEL     | Set specific channel                 | uint8_t channel            |
+| 0x15 | CMD_GET_SCAN_RESULTS| Request buffered scan results        | None                       |
+| 0x16 | CMD_CLEAR_RESULTS   | Clear result buffer                  | None                       |
+| 0x17 | CMD_SET_SCAN_MODE   | Set scan mode (active/passive)       | uint8_t mode               |
+| 0x18 | CMD_SET_SCAN_INTERVAL| Set scan interval                   | uint16_t interval_ms       |
+| 0xFF | CMD_RESET           | Reset subordinate                    | None                       |
 
 ## Response Types (Subordinate → Controller)
 
-| Code | Response            | Description                          | Payload                |
-|------|---------------------|--------------------------------------|------------------------|
-| 0x01 | RESP_ACK            | Acknowledgment                       | None                   |
-| 0x02 | RESP_NACK           | Negative acknowledgment              | ErrorCode (1 byte)     |
-| 0x10 | RESP_STATUS         | Status information                   | StatusInfo (16 bytes)  |
-| 0x20 | RESP_SCAN_RESULT    | WiFi scan result                     | WiFiScanResult (47 bytes)|
-| 0x21 | RESP_SCAN_COMPLETE  | Scan cycle complete                  | None                   |
-| 0xFE | RESP_ERROR          | Error response                       | ErrorCode (1 byte)     |
+| Code | Response            | Description                          | Payload                    |
+|------|---------------------|--------------------------------------|----------------------------|
+| 0x01 | RESP_ACK            | Acknowledgment                       | None                       |
+| 0x02 | RESP_NACK           | Negative acknowledgment              | ErrorCode (1 byte)         |
+| 0x03 | RESP_ADDRESS_ASSIGNED| Address assignment confirmation     | AddressAssignment (2 bytes)|
+| 0x10 | RESP_STATUS         | Status information                   | StatusInfo (16 bytes)      |
+| 0x20 | RESP_SCAN_RESULT    | WiFi scan result                     | WiFiScanResult (47 bytes)  |
+| 0x21 | RESP_SCAN_COMPLETE  | Scan cycle complete                  | None                       |
+| 0xFE | RESP_ERROR          | Error response                       | ErrorCode (1 byte)         |
 
 ## Data Structures
+
+### AddressAssignment (2 bytes)
+
+Used for auto-discovery address assignment.
+
+| Offset | Field           | Size | Description                              |
+|--------|-----------------|------|------------------------------------------|
+| 0      | assignedAddress | 1    | Address being assigned to the subordinate|
+| 1      | isLastNode      | 1    | 1 if last node in chain, 0 otherwise     |
+
+**Auto-Discovery Process:**
+1. Controller sends CMD_ASSIGN_ADDRESS(address=1) downstream
+2. First unassigned subordinate receives it, adopts address 1
+3. Subordinate tries to forward CMD_ASSIGN_ADDRESS(address=2) downstream with timeout
+4. If timeout (no response), subordinate sets isLastNode=1
+5. Subordinate sends RESP_ADDRESS_ASSIGNED upstream to controller
+6. Process repeats for each subordinate in the chain
+7. Controller counts responses to determine total number of subordinates
 
 ### ScanParams (9 bytes)
 

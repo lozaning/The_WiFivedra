@@ -56,6 +56,59 @@ public:
     isEndNode = isLast;
   }
 
+  bool getIsEndNode() const {
+    return isEndNode;
+  }
+
+  // Send CMD_ASSIGN_ADDRESS downstream and wait for response to detect if last node
+  bool tryAssignDownstream(uint8_t nextAddress) {
+    if (downstreamSerial == nullptr) {
+      return false;  // No downstream connection
+    }
+
+    // Send address assignment command downstream
+    AddressAssignment assignment;
+    assignment.assignedAddress = nextAddress;
+    assignment.isLastNode = 0;  // Will be determined by the receiving node
+
+    // Send using UNASSIGNED_ADDRESS as source since we're forwarding during discovery
+    txPacket.header.startMarker = PACKET_START_MARKER;
+    txPacket.header.version = PROTOCOL_VERSION;
+    txPacket.header.destAddr = UNASSIGNED_ADDRESS;  // To next unassigned device
+    txPacket.header.srcAddr = myAddress;
+    txPacket.header.type = CMD_ASSIGN_ADDRESS;
+    txPacket.header.length = sizeof(AddressAssignment);
+    txPacket.header.seqNum = seqNum++;
+
+    memcpy(txPacket.payload, &assignment, sizeof(AddressAssignment));
+
+    txPacket.footer.checksum = txPacket.calculateChecksum();
+    txPacket.footer.endMarker = PACKET_END_MARKER;
+
+    // Send packet downstream
+    downstreamSerial->write((uint8_t*)&txPacket.header, sizeof(PacketHeader));
+    downstreamSerial->write(txPacket.payload, sizeof(AddressAssignment));
+    downstreamSerial->write((uint8_t*)&txPacket.footer, sizeof(PacketFooter));
+    downstreamSerial->flush();
+
+    // Wait for acknowledgment from downstream with timeout
+    unsigned long startTime = millis();
+    while (millis() - startTime < ADDRESS_ASSIGNMENT_TIMEOUT_MS) {
+      Packet response;
+      if (processSerialInput(downstreamSerial, downstreamRxBuffer, downstreamRxIndex,
+                             downstreamReceiving, downstreamLastByteTime, response)) {
+        // Got a response from downstream - there is a next device
+        if (response.header.type == RESP_ADDRESS_ASSIGNED) {
+          return true;  // Successfully assigned to downstream device
+        }
+      }
+      delay(10);
+    }
+
+    // Timeout - no downstream device found
+    return false;
+  }
+
   // Send a packet (determines direction automatically)
   bool sendPacket(uint8_t destAddr, uint8_t type, const uint8_t* payload, uint16_t length) {
     if (length > MAX_PAYLOAD_SIZE) {
@@ -201,8 +254,10 @@ private:
 
               // Verify checksum
               if (packet.verifyChecksum()) {
-                // Check if packet is for us or broadcast
-                if (packet.header.destAddr == myAddress || packet.header.destAddr == 0xFF) {
+                // Check if packet is for us, broadcast, or unassigned (during discovery)
+                if (packet.header.destAddr == myAddress ||
+                    packet.header.destAddr == 0xFF ||
+                    (packet.header.destAddr == UNASSIGNED_ADDRESS && myAddress == UNASSIGNED_ADDRESS)) {
                   return true;  // Packet is for this device
                 } else {
                   // Packet is not for us - forward it

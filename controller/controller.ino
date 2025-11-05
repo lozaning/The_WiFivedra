@@ -41,7 +41,8 @@ struct SubordinateInfo {
 };
 
 SubordinateInfo subordinates[MAX_SUBORDINATES];
-uint8_t numSubordinates = 48; // Configurable
+uint8_t numSubordinates = 0; // Auto-discovered during startup
+uint8_t lastSubordinateAddress = 0;
 
 // Scan configuration
 ScanParams globalScanParams = {
@@ -63,7 +64,8 @@ uint32_t totalScansReceived = 0;
 // State machine
 enum ControllerState {
   CTRL_INIT,
-  CTRL_DISCOVERING,
+  CTRL_AUTO_DISCOVERING,  // Auto-assign addresses
+  CTRL_DISCOVERING,        // Ping discovered devices
   CTRL_CONFIGURING,
   CTRL_SCANNING,
   CTRL_IDLE
@@ -103,9 +105,9 @@ void setup() {
     Serial.println("WARNING: SD card not found - data will not be saved!");
   }
 
-  // Start discovery
-  state = CTRL_DISCOVERING;
-  discoverSubordinates();
+  // Start auto-discovery (address assignment)
+  state = CTRL_AUTO_DISCOVERING;
+  autoDiscoverSubordinates();
 }
 
 void loop() {
@@ -117,6 +119,16 @@ void loop() {
 
   // State machine
   switch (state) {
+    case CTRL_AUTO_DISCOVERING:
+      // Auto-discovery is async, wait for all subordinates to respond
+      // Timeout after 10 seconds (generous for long chains)
+      if (millis() - scanStartTime > 10000) {
+        printAutoDiscoveryResults();
+        state = CTRL_DISCOVERING;
+        discoverSubordinates();  // Ping all discovered devices
+      }
+      break;
+
     case CTRL_DISCOVERING:
       // Discovery is async, wait for responses
       if (millis() - scanStartTime > 5000) {
@@ -162,11 +174,46 @@ void loop() {
   delay(1);
 }
 
-void discoverSubordinates() {
-  Serial.println("\n--- Discovering Subordinates ---");
+void autoDiscoverSubordinates() {
+  Serial.println("\n--- Auto-Discovering Subordinates ---");
+  Serial.println("Assigning addresses via daisy chain...");
   scanStartTime = millis();
 
-  // Send ping to all subordinates
+  // Send CMD_ASSIGN_ADDRESS with address=1 to the first subordinate
+  AddressAssignment assignment;
+  assignment.assignedAddress = 1;
+  assignment.isLastNode = 0;
+
+  protocol.sendCommand(UNASSIGNED_ADDRESS, CMD_ASSIGN_ADDRESS,
+                      &assignment, sizeof(assignment));
+
+  Serial.println("Sent address assignment command downstream");
+  Serial.println("Waiting for subordinates to report...");
+}
+
+void printAutoDiscoveryResults() {
+  Serial.println("\n--- Auto-Discovery Complete ---");
+  Serial.printf("Total subordinates discovered: %d\n", numSubordinates);
+
+  if (lastSubordinateAddress > 0) {
+    Serial.printf("Last subordinate in chain: #%d\n", lastSubordinateAddress);
+  }
+
+  for (uint8_t i = 0; i < numSubordinates; i++) {
+    Serial.printf("  Sub %d: ", subordinates[i].address);
+    if (subordinates[i].address == lastSubordinateAddress) {
+      Serial.println("(LAST NODE)");
+    } else {
+      Serial.println("");
+    }
+  }
+}
+
+void discoverSubordinates() {
+  Serial.println("\n--- Pinging Subordinates ---");
+  scanStartTime = millis();
+
+  // Send ping to all discovered subordinates
   for (uint8_t i = 0; i < numSubordinates; i++) {
     protocol.sendCommand(subordinates[i].address, CMD_PING);
     delay(10); // Small delay between commands
@@ -238,6 +285,22 @@ void handlePacket(Packet& packet) {
   switch (packet.header.type) {
     case RESP_ACK:
       // Acknowledgment received
+      break;
+
+    case RESP_ADDRESS_ASSIGNED:
+      if (packet.header.length == sizeof(AddressAssignment)) {
+        AddressAssignment confirmation;
+        memcpy(&confirmation, packet.payload, sizeof(AddressAssignment));
+
+        Serial.printf("Subordinate #%d registered", confirmation.assignedAddress);
+        if (confirmation.isLastNode) {
+          Serial.print(" (LAST NODE)");
+          lastSubordinateAddress = confirmation.assignedAddress;
+        }
+        Serial.println();
+
+        numSubordinates++;
+      }
       break;
 
     case RESP_STATUS:
@@ -357,25 +420,25 @@ void handleSerialCommand() {
     startScanning();
   } else if (cmd == "stop") {
     stopScanning();
+  } else if (cmd == "autodiscover") {
+    // Reset and re-run auto-discovery
+    numSubordinates = 0;
+    lastSubordinateAddress = 0;
+    state = CTRL_AUTO_DISCOVERING;
+    autoDiscoverSubordinates();
   } else if (cmd == "discover") {
     state = CTRL_DISCOVERING;
     discoverSubordinates();
   } else if (cmd == "config") {
     configureSubordinates();
-  } else if (cmd.startsWith("subs ")) {
-    numSubordinates = cmd.substring(5).toInt();
-    if (numSubordinates > MAX_SUBORDINATES) {
-      numSubordinates = MAX_SUBORDINATES;
-    }
-    Serial.printf("Number of subordinates set to: %d\n", numSubordinates);
   } else if (cmd == "help") {
     Serial.println("\nCommands:");
-    Serial.println("  status (s)  - Show statistics");
-    Serial.println("  start       - Start scanning");
-    Serial.println("  stop        - Stop scanning");
-    Serial.println("  discover    - Discover subordinates");
-    Serial.println("  config      - Configure subordinates");
-    Serial.println("  subs <n>    - Set number of subordinates");
-    Serial.println("  help        - Show this help");
+    Serial.println("  status (s)     - Show statistics");
+    Serial.println("  start          - Start scanning");
+    Serial.println("  stop           - Stop scanning");
+    Serial.println("  autodiscover   - Auto-assign addresses to subordinates");
+    Serial.println("  discover       - Ping all discovered subordinates");
+    Serial.println("  config         - Configure subordinates");
+    Serial.println("  help           - Show this help");
   }
 }

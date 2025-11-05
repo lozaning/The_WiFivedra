@@ -18,10 +18,6 @@
 #include "../common/serial_protocol.h"
 #include <WiFi.h>
 
-// Configuration - SET THIS FOR EACH DEVICE
-#define MY_ADDRESS 1        // Change this for each subordinate (1-48)
-#define IS_LAST_NODE false  // Set to true ONLY for the last subordinate in the chain
-
 // Pin Configuration
 #define LED_PIN 2
 
@@ -39,7 +35,12 @@
 HardwareSerial upstreamSerial(1);    // UART1
 HardwareSerial downstreamSerial(2);  // UART2
 
-SerialProtocol protocol(&upstreamSerial, &downstreamSerial, MY_ADDRESS, IS_LAST_NODE);
+// Start with unassigned address - will be auto-assigned during discovery
+SerialProtocol protocol(&upstreamSerial, &downstreamSerial, UNASSIGNED_ADDRESS, false);
+
+// Auto-discovery state
+bool addressAssigned = false;
+uint8_t myAssignedAddress = UNASSIGNED_ADDRESS;
 
 // Scan parameters
 ScanParams scanParams = {
@@ -78,15 +79,11 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   bootTime = millis();
 
-  // Configure UART pins
+  // Configure UART pins - always configure both initially
   upstreamSerial.begin(SERIAL_BAUD_RATE, SERIAL_8N1, UPSTREAM_RX_PIN, UPSTREAM_TX_PIN);
+  downstreamSerial.begin(SERIAL_BAUD_RATE, SERIAL_8N1, DOWNSTREAM_RX_PIN, DOWNSTREAM_TX_PIN);
 
-  // Only configure downstream if not the last node
-  if (!IS_LAST_NODE) {
-    downstreamSerial.begin(SERIAL_BAUD_RATE, SERIAL_8N1, DOWNSTREAM_RX_PIN, DOWNSTREAM_TX_PIN);
-  }
-
-  // Initialize serial protocol (it will use the configured serials)
+  // Initialize serial protocol
   protocol.begin(SERIAL_BAUD_RATE);
 
   // Set WiFi to station mode
@@ -97,7 +94,50 @@ void setup() {
   status.channel = scanParams.channel;
   status.band = scanParams.band;
 
+  // Wait for address assignment - blink LED rapidly
+  while (!addressAssigned) {
+    digitalWrite(LED_PIN, (millis() / 100) % 2);
+
+    Packet packet;
+    if (protocol.receivePacket(packet)) {
+      if (packet.header.type == CMD_ASSIGN_ADDRESS) {
+        handleAddressAssignment(packet);
+      }
+    }
+    delay(10);
+  }
+
   delay(100);
+}
+
+void handleAddressAssignment(Packet& packet) {
+  if (packet.header.length != sizeof(AddressAssignment)) {
+    return;  // Invalid payload
+  }
+
+  AddressAssignment assignment;
+  memcpy(&assignment, packet.payload, sizeof(AddressAssignment));
+
+  // Adopt the assigned address
+  myAssignedAddress = assignment.assignedAddress;
+  protocol.setAddress(myAssignedAddress);
+  addressAssigned = true;
+
+  // Try to assign address to next subordinate downstream
+  bool hasDownstream = protocol.tryAssignDownstream(myAssignedAddress + 1);
+
+  if (!hasDownstream) {
+    // No downstream device responded - this is the last node
+    protocol.setEndNode(true);
+  }
+
+  // Send confirmation upstream to controller
+  AddressAssignment confirmation;
+  confirmation.assignedAddress = myAssignedAddress;
+  confirmation.isLastNode = protocol.getIsEndNode() ? 1 : 0;
+
+  protocol.sendResponse(CONTROLLER_ADDRESS, RESP_ADDRESS_ASSIGNED,
+                       &confirmation, sizeof(confirmation));
 }
 
 void loop() {
@@ -120,11 +160,14 @@ void loop() {
   status.freeHeap = (ESP.getFreeHeap() * 100) / ESP.getHeapSize();
 
   // LED indicator
-  if (scanningActive) {
-    // Fast blink when scanning
+  if (!addressAssigned) {
+    // Very fast blink when waiting for address
     digitalWrite(LED_PIN, (millis() / 100) % 2);
+  } else if (scanningActive) {
+    // Fast blink when scanning
+    digitalWrite(LED_PIN, (millis() / 200) % 2);
   } else {
-    // Slow blink when idle
+    // Slow blink when idle and addressed
     digitalWrite(LED_PIN, (millis() / 1000) % 2);
   }
 
