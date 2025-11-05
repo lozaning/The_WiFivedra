@@ -89,6 +89,17 @@ uint16_t newNetworksCount = 0;
 uint16_t totalNetworksScanned = 0;  // Total networks found in scans
 uint16_t totalNewNetworks = 0;      // Total new (unique) networks discovered
 
+// GPS caching - stores most recent GPS position from controller
+GPSPosition cachedGPS = {
+  .latitude = 0.0,
+  .longitude = 0.0,
+  .altitude = 0.0,
+  .satellites = 0,
+  .fixQuality = 0,
+  .timestamp = 0
+};
+bool hasValidGPS = false;
+
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   bootTime = millis();
@@ -194,6 +205,15 @@ void handleCommand(Packet& packet) {
   switch (cmd) {
     case CMD_PING:
       protocol.sendAck(CONTROLLER_ADDRESS);
+      break;
+
+    case CMD_GPS_UPDATE:
+      // Update cached GPS position from controller
+      if (packet.header.length == sizeof(GPSPosition)) {
+        memcpy(&cachedGPS, packet.payload, sizeof(GPSPosition));
+        hasValidGPS = (cachedGPS.fixQuality > 0);
+        // No ACK needed for broadcast GPS updates (reduces traffic)
+      }
       break;
 
     case CMD_SET_SCAN_PARAMS:
@@ -332,6 +352,13 @@ void performScan() {
     } else {
       result.band = BAND_5GHZ;
     }
+
+    // Add GPS coordinates from cached position
+    // These are from when the scan happened, not when transmitted to controller
+    result.latitude = cachedGPS.latitude;
+    result.longitude = cachedGPS.longitude;
+    result.altitude = cachedGPS.altitude;
+    result.gpsQuality = cachedGPS.fixQuality;
 
     // Check if this is a new network or one we've seen before
     bool isNewNetwork = processNetworkResult(result);

@@ -31,6 +31,7 @@
 enum CommandType : uint8_t {
   CMD_PING = 0x01,                    // Test connectivity
   CMD_ASSIGN_ADDRESS = 0x02,          // Auto-discovery address assignment
+  CMD_GPS_UPDATE = 0x03,              // Broadcast current GPS position
   CMD_SET_SCAN_PARAMS = 0x10,         // Set WiFi scan parameters
   CMD_START_SCAN = 0x11,              // Start WiFi scanning
   CMD_STOP_SCAN = 0x12,               // Stop WiFi scanning
@@ -134,6 +135,16 @@ struct Packet {
   }
 };
 
+// GPS Position Structure
+struct __attribute__((packed)) GPSPosition {
+  float latitude;           // Latitude in decimal degrees (-90 to +90)
+  float longitude;          // Longitude in decimal degrees (-180 to +180)
+  float altitude;           // Altitude in meters
+  uint8_t satellites;       // Number of satellites
+  uint8_t fixQuality;       // 0=no fix, 1=GPS fix, 2=DGPS fix
+  uint32_t timestamp;       // GPS timestamp (milliseconds since epoch or boot)
+};
+
 // Address Assignment Structure
 struct __attribute__((packed)) AddressAssignment {
   uint8_t assignedAddress;  // Address to assign to the receiving subordinate
@@ -160,6 +171,11 @@ struct __attribute__((packed)) WiFiScanResult {
   uint8_t band;           // WiFiBand
   uint8_t authMode;       // Authentication mode
   uint32_t timestamp;     // Time of scan (ms since boot)
+  // GPS coordinates from when network was scanned
+  float latitude;         // Latitude in decimal degrees
+  float longitude;        // Longitude in decimal degrees
+  float altitude;         // Altitude in meters
+  uint8_t gpsQuality;     // GPS fix quality (0=no fix, 1=GPS, 2=DGPS)
 };
 
 // Status Information Structure

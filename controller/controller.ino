@@ -27,8 +27,13 @@
 #define DOWNSTREAM_TX_PIN 17  // ESP32 TX to Sub1's RX
 #define DOWNSTREAM_RX_PIN 16  // ESP32 RX from Sub1's TX
 
-// Serial ports for subordinate communication
+// GPS UART Pin Configuration
+#define GPS_TX_PIN 19  // ESP32 TX (not used for GPS input)
+#define GPS_RX_PIN 18  // ESP32 RX from GPS module
+
+// Serial ports
 HardwareSerial downstreamSerial(1);  // Serial1 for daisy chain
+HardwareSerial gpsSerial(2);          // Serial2 for GPS
 SerialProtocol protocol(&downstreamSerial, CONTROLLER_ADDRESS);
 
 // Subordinate tracking
@@ -66,6 +71,12 @@ uint8_t currentPollIndex = 0;  // Round-robin polling
 uint8_t pendingResultsFrom = 0;  // Track which subordinate we're receiving results from
 bool waitingForResults = false;  // True when waiting for a subordinate to finish sending results
 
+// GPS tracking
+GPSPosition currentGPS = {0};
+unsigned long lastGPSBroadcast = 0;
+#define GPS_BROADCAST_INTERVAL_MS 1000  // Broadcast GPS every 1 second
+String nmeaBuffer = "";  // Buffer for NMEA sentence parsing
+
 // State machine
 enum ControllerState {
   CTRL_INIT,
@@ -101,6 +112,10 @@ void setup() {
   protocol.begin(SERIAL_BAUD_RATE);
   Serial.println("Serial protocol initialized (daisy chain)");
 
+  // Initialize GPS
+  gpsSerial.begin(9600, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  Serial.println("GPS serial initialized (9600 baud)");
+
   // Initialize SD card
   if (SD.begin(SD_CS_PIN)) {
     sdCardAvailable = true;
@@ -116,6 +131,15 @@ void setup() {
 }
 
 void loop() {
+  // Parse GPS data
+  readGPS();
+
+  // Broadcast GPS to subordinates periodically
+  if (millis() - lastGPSBroadcast >= GPS_BROADCAST_INTERVAL_MS) {
+    broadcastGPS();
+    lastGPSBroadcast = millis();
+  }
+
   // Handle incoming packets
   Packet packet;
   if (protocol.receivePacket(packet)) {
@@ -386,12 +410,13 @@ void logScanResult(uint8_t subAddr, WiFiScanResult& result) {
     createNewLogFile();
   }
 
-  // CSV format: timestamp,sub_addr,bssid,ssid,rssi,channel,band,auth
-  logFile.printf("%lu,%d,%02X:%02X:%02X:%02X:%02X:%02X,\"%s\",%d,%d,%d,%d\n",
+  // CSV format: timestamp,sub_addr,bssid,ssid,rssi,channel,band,auth,latitude,longitude,altitude,gps_quality
+  logFile.printf("%lu,%d,%02X:%02X:%02X:%02X:%02X:%02X,\"%s\",%d,%d,%d,%d,%.8f,%.8f,%.2f,%d\n",
                  result.timestamp, subAddr,
                  result.bssid[0], result.bssid[1], result.bssid[2],
                  result.bssid[3], result.bssid[4], result.bssid[5],
-                 result.ssid, result.rssi, result.channel, result.band, result.authMode);
+                 result.ssid, result.rssi, result.channel, result.band, result.authMode,
+                 result.latitude, result.longitude, result.altitude, result.gpsQuality);
 
   // Periodic flush
   static uint32_t flushCounter = 0;
@@ -407,7 +432,7 @@ void createNewLogFile() {
   logFile = SD.open(filename, FILE_WRITE);
   if (logFile) {
     // Write CSV header
-    logFile.println("timestamp,sub_addr,bssid,ssid,rssi,channel,band,auth");
+    logFile.println("timestamp,sub_addr,bssid,ssid,rssi,channel,band,auth,latitude,longitude,altitude,gps_quality");
     logFile.flush();
     Serial.printf("Created log file: %s\n", filename);
   }
@@ -471,5 +496,80 @@ void handleSerialCommand() {
     Serial.println("  discover       - Ping all discovered subordinates");
     Serial.println("  config         - Configure subordinates");
     Serial.println("  help           - Show this help");
+  }
+}
+
+// Read and parse GPS data from NMEA sentences
+void readGPS() {
+  while (gpsSerial.available()) {
+    char c = gpsSerial.read();
+
+    if (c == '\n') {
+      // Complete NMEA sentence received
+      parseNMEA(nmeaBuffer);
+      nmeaBuffer = "";
+    } else if (c != '\r') {
+      nmeaBuffer += c;
+    }
+  }
+}
+
+// Parse NMEA sentence (focusing on GGA for position data)
+void parseNMEA(String sentence) {
+  if (sentence.startsWith("$GPGGA") || sentence.startsWith("$GNGGA")) {
+    // Example: $GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47
+    // Split by commas
+    int idx[15];
+    int count = 0;
+    idx[0] = 0;
+
+    for (int i = 0; i < sentence.length() && count < 14; i++) {
+      if (sentence[i] == ',') {
+        idx[++count] = i + 1;
+      }
+    }
+
+    if (count >= 9) {
+      // Parse latitude
+      String latStr = sentence.substring(idx[1], idx[2] - 1);
+      String latDir = sentence.substring(idx[2], idx[3] - 1);
+
+      // Parse longitude
+      String lonStr = sentence.substring(idx[3], idx[4] - 1);
+      String lonDir = sentence.substring(idx[4], idx[5] - 1);
+
+      // Parse fix quality
+      String fixStr = sentence.substring(idx[5], idx[6] - 1);
+
+      // Parse number of satellites
+      String satStr = sentence.substring(idx[6], idx[7] - 1);
+
+      // Parse altitude
+      String altStr = sentence.substring(idx[8], idx[9] - 1);
+
+      if (latStr.length() > 0 && lonStr.length() > 0) {
+        // Convert NMEA format (DDMM.MMMM) to decimal degrees
+        float lat = latStr.substring(0, 2).toFloat() + latStr.substring(2).toFloat() / 60.0;
+        if (latDir == "S") lat = -lat;
+
+        float lon = lonStr.substring(0, 3).toFloat() + lonStr.substring(3).toFloat() / 60.0;
+        if (lonDir == "W") lon = -lon;
+
+        currentGPS.latitude = lat;
+        currentGPS.longitude = lon;
+        currentGPS.altitude = altStr.toFloat();
+        currentGPS.satellites = satStr.toInt();
+        currentGPS.fixQuality = fixStr.toInt();
+        currentGPS.timestamp = millis();
+      }
+    }
+  }
+}
+
+// Broadcast current GPS position to all subordinates
+void broadcastGPS() {
+  if (numSubordinates > 0 && state == CTRL_SCANNING) {
+    // Broadcast to all subordinates (address 0xFF = broadcast)
+    protocol.sendCommand(0xFF, CMD_GPS_UPDATE, &currentGPS, sizeof(GPSPosition));
   }
 }
