@@ -18,6 +18,16 @@
 #include "../common/serial_protocol.h"
 #include <WiFi.h>
 
+// Forward declarations
+void handleAddressAssignment(Packet& packet);
+void handleCommand(Packet& packet);
+void performScan();
+int16_t findSeenNetwork(const uint8_t* bssid);
+void moveSeenNetworkToTop(uint16_t index);
+void addToSeenNetworks(const uint8_t* bssid, uint32_t timestamp);
+bool processNetworkResult(const WiFiScanResult& result);
+void sendBufferedResults();
+
 // Pin Configuration
 #define LED_PIN 2
 
@@ -61,7 +71,7 @@ StatusInfo status = {
   .scanCount = 0,
   .resultCount = 0,
   .uptime = 0,
-  .lastError = ERR_NONE,
+  .lastError = PROTO_ERR_NONE,
   .freeHeap = 100
 };
 
@@ -223,7 +233,7 @@ void handleCommand(Packet& packet) {
         status.band = scanParams.band;
         protocol.sendAck(CONTROLLER_ADDRESS);
       } else {
-        protocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
+        protocol.sendNack(CONTROLLER_ADDRESS, PROTO_ERR_INVALID_PARAMS);
       }
       break;
 
@@ -234,7 +244,7 @@ void handleCommand(Packet& packet) {
         lastScanTime = 0; // Trigger immediate scan
         protocol.sendAck(CONTROLLER_ADDRESS);
       } else {
-        protocol.sendNack(CONTROLLER_ADDRESS, ERR_BUSY);
+        protocol.sendNack(CONTROLLER_ADDRESS, PROTO_ERR_BUSY);
       }
       break;
 
@@ -254,7 +264,7 @@ void handleCommand(Packet& packet) {
         status.channel = scanParams.channel;
         protocol.sendAck(CONTROLLER_ADDRESS);
       } else {
-        protocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
+        protocol.sendNack(CONTROLLER_ADDRESS, PROTO_ERR_INVALID_PARAMS);
       }
       break;
 
@@ -274,7 +284,7 @@ void handleCommand(Packet& packet) {
         scanParams.scanMode = (ScanMode)packet.payload[0];
         protocol.sendAck(CONTROLLER_ADDRESS);
       } else {
-        protocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
+        protocol.sendNack(CONTROLLER_ADDRESS, PROTO_ERR_INVALID_PARAMS);
       }
       break;
 
@@ -283,7 +293,7 @@ void handleCommand(Packet& packet) {
         memcpy(&scanParams.intervalMs, packet.payload, 2);
         protocol.sendAck(CONTROLLER_ADDRESS);
       } else {
-        protocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_PARAMS);
+        protocol.sendNack(CONTROLLER_ADDRESS, PROTO_ERR_INVALID_PARAMS);
       }
       break;
 
@@ -294,7 +304,7 @@ void handleCommand(Packet& packet) {
       break;
 
     default:
-      protocol.sendNack(CONTROLLER_ADDRESS, ERR_INVALID_COMMAND);
+      protocol.sendNack(CONTROLLER_ADDRESS, PROTO_ERR_INVALID_COMMAND);
       break;
   }
 }
@@ -319,7 +329,7 @@ void performScan() {
 
   if (scanResult < 0) {
     // Scan failed
-    status.lastError = ERR_SCAN_FAILED;
+    status.lastError = PROTO_ERR_SCAN_FAILED;
     return;
   }
 
@@ -370,7 +380,7 @@ void performScan() {
         status.resultCount = newNetworksCount;
       } else {
         // Buffer full - set error but continue scanning
-        status.lastError = ERR_BUFFER_FULL;
+        status.lastError = PROTO_ERR_BUFFER_FULL;
       }
     }
   }

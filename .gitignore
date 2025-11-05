@@ -1,0 +1,15 @@
+# PlatformIO
+.pio/
+.vscode/
+src/
+
+# Build artifacts
+*.bin
+*.elf
+*.map
+
+# IDE
+.DS_Store
+*.swp
+*.swo
+*~

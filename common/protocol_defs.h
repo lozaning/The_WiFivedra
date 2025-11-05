@@ -56,17 +56,18 @@ enum ResponseType : uint8_t {
 };
 
 // Error Codes
+// Note: Prefixed with PROTO_ to avoid conflicts with system error codes (e.g., lwIP's ERR_TIMEOUT)
 enum ErrorCode : uint8_t {
-  ERR_NONE = 0x00,
-  ERR_INVALID_COMMAND = 0x01,
-  ERR_INVALID_PARAMS = 0x02,
-  ERR_TIMEOUT = 0x03,
-  ERR_BUSY = 0x04,
-  ERR_NOT_READY = 0x05,
-  ERR_SCAN_FAILED = 0x06,
-  ERR_BUFFER_FULL = 0x07,
-  ERR_CHECKSUM = 0x08,
-  ERR_UNKNOWN = 0xFF
+  PROTO_ERR_NONE = 0x00,
+  PROTO_ERR_INVALID_COMMAND = 0x01,
+  PROTO_ERR_INVALID_PARAMS = 0x02,
+  PROTO_ERR_TIMEOUT = 0x03,
+  PROTO_ERR_BUSY = 0x04,
+  PROTO_ERR_NOT_READY = 0x05,
+  PROTO_ERR_SCAN_FAILED = 0x06,
+  PROTO_ERR_BUFFER_FULL = 0x07,
+  PROTO_ERR_CHECKSUM = 0x08,
+  PROTO_ERR_UNKNOWN = 0xFF
 };
 
 // WiFi Band

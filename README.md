@@ -50,28 +50,119 @@ The WiFivedra is the second generation WiFi monitoring device featuring up to 52
 - Eliminates wire collisions in the daisy chain
 - Subordinates ONLY transmit when polled (except during discovery)
 
+## Building the Firmware
+
+### Two Firmware Versions Available
+
+WiFivedra firmware is available in **two versions**:
+
+1. **Arduino Framework** (in `controller/` and `subordinate/` directories)
+   - Easier to get started
+   - Uses familiar Arduino APIs
+   - ESP32-C3 used as proxy for ESP32-C5 in PlatformIO
+
+2. **ESP-IDF (Espressif SDK)** (in `controller_espidf/` and `subordinate_espidf/` directories)
+   - **Native ESP32-C5 support** ✅
+   - Better performance and lower resource usage
+   - Production-ready
+   - More control over hardware
+
+**For ESP32-C5 hardware, use the ESP-IDF version.**
+
+### Building with Arduino/PlatformIO
+
+#### Prerequisites
+- [PlatformIO](https://platformio.org/) installed (`pip install platformio`)
+
+#### Build Commands
+
+Use the provided build script for easy compilation:
+
+```bash
+# Build both controller and subordinate firmware
+./build.sh all
+
+# Build only controller firmware
+./build.sh controller
+
+# Build only subordinate firmware
+./build.sh subordinate
+
+# Clean build files
+./build.sh clean
+```
+
+**Build outputs:**
+- Controller firmware: `.pio/build/controller/firmware.bin`
+- Subordinate firmware: `.pio/build/subordinate/firmware.bin`
+
+**Note:** The subordinate firmware is configured for ESP32-C3 in PlatformIO as ESP32-C5 support is not yet available. The firmware will work on ESP32-C5 hardware with minor adjustments.
+
+### Alternative: Arduino IDE
+
+Both firmwares can also be compiled using Arduino IDE:
+1. Open `controller/controller.ino` or `subordinate/subordinate.ino`
+2. Select the appropriate board (ESP32 Dev Module for controller, ESP32-C5 for subordinate)
+3. Click Upload
+
+### Building with ESP-IDF (Recommended for ESP32-C5)
+
+For **native ESP32-C5 support** and better performance, use the ESP-IDF versions:
+
+```bash
+# Controller (ESP32)
+cd controller_espidf
+idf.py set-target esp32
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+
+# Subordinate (ESP32-C5)
+cd subordinate_espidf
+idf.py set-target esp32c5
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+```
+
+**See [ESP-IDF_BUILD.md](ESP-IDF_BUILD.md) for detailed ESP-IDF build instructions.**
+
 ## Quick Start
 
-1. **Hardware Setup**: Wire subordinates in daisy chain (see [docs/SETUP.md](docs/SETUP.md))
-2. **Flash Firmware**: Upload **identical** subordinate firmware to all ESP32-C5s
-3. **Flash Controller**: Upload controller firmware to ESP32
-4. **Power On**: System auto-discovers all subordinates on startup
-5. **Start Scanning**: Type `start` in controller serial terminal (115200 baud)
+1. **Build Firmware**: Use `./build.sh all` to compile both firmwares
+2. **Hardware Setup**: Wire subordinates in daisy chain (see [docs/SETUP.md](docs/SETUP.md))
+3. **Flash Firmware**: Upload **identical** subordinate firmware to all ESP32-C5s
+4. **Flash Controller**: Upload controller firmware to ESP32
+5. **Power On**: System auto-discovers all subordinates on startup
+6. **Start Scanning**: Type `start` in controller serial terminal (115200 baud)
 
 ## Project Structure
 
 ```
 The_WiFivedra/
-├── common/
-│   ├── protocol_defs.h       # Protocol definitions and data structures
-│   └── serial_protocol.h     # Serial communication handler
-├── controller/
-│   └── controller.ino        # Controller firmware (ESP32)
-├── subordinate/
-│   └── subordinate.ino       # Subordinate firmware (ESP32-C5)
-└── docs/
-    ├── PROTOCOL.md           # Serial protocol specification
-    └── SETUP.md              # Hardware and software setup guide
+├── common/                           # Arduino framework common files
+│   ├── protocol_defs.h               # Protocol definitions and data structures
+│   └── serial_protocol.h             # Serial communication handler
+├── controller/                       # Arduino framework controller
+│   └── controller.ino                # Controller firmware (ESP32)
+├── subordinate/                      # Arduino framework subordinate
+│   └── subordinate.ino               # Subordinate firmware (ESP32-C5)
+├── controller_espidf/                # ESP-IDF controller (native ESP32)
+│   ├── CMakeLists.txt
+│   ├── sdkconfig.defaults
+│   └── main/
+│       ├── controller_main.c         # Controller firmware (ESP-IDF)
+│       └── protocol_defs.h
+├── subordinate_espidf/               # ESP-IDF subordinate (native ESP32-C5)
+│   ├── CMakeLists.txt
+│   ├── sdkconfig.defaults
+│   └── main/
+│       ├── subordinate_main.c        # Subordinate firmware (ESP-IDF)
+│       └── protocol_defs.h
+├── docs/
+│   ├── PROTOCOL.md                   # Serial protocol specification
+│   └── SETUP.md                      # Hardware and software setup guide
+├── platformio.ini                    # PlatformIO build configuration
+├── build.sh                          # Build script for Arduino version
+└── ESP-IDF_BUILD.md                  # ESP-IDF build instructions
 ```
 
 ## Serial Protocol
