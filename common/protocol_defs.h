@@ -1,0 +1,191 @@
+#ifndef PROTOCOL_DEFS_H
+#define PROTOCOL_DEFS_H
+
+#include <Arduino.h>
+
+// Protocol Version
+#define PROTOCOL_VERSION 1
+
+// Serial Configuration
+#define SERIAL_BAUD_RATE 115200
+#define MAX_PACKET_SIZE 512
+#define MAX_PAYLOAD_SIZE (MAX_PACKET_SIZE - 10) // Minus header and footer
+
+// Packet Framing
+#define PACKET_START_MARKER 0xAA
+#define PACKET_END_MARKER 0x55
+
+// Device Configuration
+#define MAX_SUBORDINATES 48
+#define CONTROLLER_ADDRESS 0x00
+
+// Timing Constants
+#define COMMAND_TIMEOUT_MS 5000
+#define SCAN_TIMEOUT_MS 10000
+#define RESPONSE_DELAY_MS 10
+
+// Command Types (Controller -> Subordinate)
+enum CommandType : uint8_t {
+  CMD_PING = 0x01,                    // Test connectivity
+  CMD_SET_SCAN_PARAMS = 0x10,         // Set WiFi scan parameters
+  CMD_START_SCAN = 0x11,              // Start WiFi scanning
+  CMD_STOP_SCAN = 0x12,               // Stop WiFi scanning
+  CMD_GET_STATUS = 0x13,              // Get subordinate status
+  CMD_SET_CHANNEL = 0x14,             // Set specific channel to monitor
+  CMD_GET_SCAN_RESULTS = 0x15,        // Request scan results
+  CMD_CLEAR_RESULTS = 0x16,           // Clear stored scan results
+  CMD_SET_SCAN_MODE = 0x17,           // Set scan mode (active/passive)
+  CMD_SET_SCAN_INTERVAL = 0x18,       // Set scan interval
+  CMD_RESET = 0xFF                    // Reset subordinate
+};
+
+// Response Types (Subordinate -> Controller)
+enum ResponseType : uint8_t {
+  RESP_ACK = 0x01,                    // Acknowledgment
+  RESP_NACK = 0x02,                   // Negative acknowledgment
+  RESP_STATUS = 0x10,                 // Status information
+  RESP_SCAN_RESULT = 0x20,            // WiFi scan result
+  RESP_SCAN_COMPLETE = 0x21,          // Scan complete notification
+  RESP_ERROR = 0xFE                   // Error response
+};
+
+// Error Codes
+enum ErrorCode : uint8_t {
+  ERR_NONE = 0x00,
+  ERR_INVALID_COMMAND = 0x01,
+  ERR_INVALID_PARAMS = 0x02,
+  ERR_TIMEOUT = 0x03,
+  ERR_BUSY = 0x04,
+  ERR_NOT_READY = 0x05,
+  ERR_SCAN_FAILED = 0x06,
+  ERR_BUFFER_FULL = 0x07,
+  ERR_CHECKSUM = 0x08,
+  ERR_UNKNOWN = 0xFF
+};
+
+// WiFi Band
+enum WiFiBand : uint8_t {
+  BAND_2_4GHZ = 0x01,
+  BAND_5GHZ = 0x02,
+  BAND_BOTH = 0x03
+};
+
+// Scan Mode
+enum ScanMode : uint8_t {
+  SCAN_MODE_ACTIVE = 0x01,
+  SCAN_MODE_PASSIVE = 0x02
+};
+
+// Subordinate State
+enum SubordinateState : uint8_t {
+  STATE_IDLE = 0x00,
+  STATE_SCANNING = 0x01,
+  STATE_PROCESSING = 0x02,
+  STATE_ERROR = 0xFE
+};
+
+// Packet Header Structure
+struct __attribute__((packed)) PacketHeader {
+  uint8_t startMarker;    // Always PACKET_START_MARKER
+  uint8_t version;        // Protocol version
+  uint8_t destAddr;       // Destination address (0x00 = controller, 0x01-0x30 = subordinates)
+  uint8_t srcAddr;        // Source address
+  uint8_t type;           // Command or Response type
+  uint16_t length;        // Payload length
+  uint8_t seqNum;         // Sequence number
+};
+
+// Packet Footer Structure
+struct __attribute__((packed)) PacketFooter {
+  uint8_t checksum;       // Simple XOR checksum
+  uint8_t endMarker;      // Always PACKET_END_MARKER
+};
+
+// Complete Packet Structure
+struct Packet {
+  PacketHeader header;
+  uint8_t payload[MAX_PAYLOAD_SIZE];
+  PacketFooter footer;
+
+  // Calculate checksum
+  uint8_t calculateChecksum() {
+    uint8_t cs = 0;
+    cs ^= header.version;
+    cs ^= header.destAddr;
+    cs ^= header.srcAddr;
+    cs ^= header.type;
+    cs ^= (header.length >> 8) & 0xFF;
+    cs ^= header.length & 0xFF;
+    cs ^= header.seqNum;
+    for (uint16_t i = 0; i < header.length; i++) {
+      cs ^= payload[i];
+    }
+    return cs;
+  }
+
+  // Verify checksum
+  bool verifyChecksum() {
+    return footer.checksum == calculateChecksum();
+  }
+};
+
+// Scan Parameters Structure
+struct __attribute__((packed)) ScanParams {
+  uint8_t band;           // WiFiBand
+  uint8_t channel;        // Specific channel (0 = all channels for band)
+  uint8_t scanMode;       // ScanMode
+  uint16_t scanTimeMs;    // Time to spend on each channel (ms)
+  uint16_t intervalMs;    // Interval between scans (ms)
+  uint8_t hidden;         // Scan for hidden networks (0 = no, 1 = yes)
+  uint8_t showHidden;     // Show hidden networks in results (0 = no, 1 = yes)
+};
+
+// WiFi Scan Result Structure
+struct __attribute__((packed)) WiFiScanResult {
+  uint8_t bssid[6];       // MAC address
+  char ssid[33];          // Network name (max 32 chars + null)
+  int8_t rssi;            // Signal strength
+  uint8_t channel;        // Channel number
+  uint8_t band;           // WiFiBand
+  uint8_t authMode;       // Authentication mode
+  uint32_t timestamp;     // Time of scan (ms since boot)
+};
+
+// Status Information Structure
+struct __attribute__((packed)) StatusInfo {
+  uint8_t state;          // SubordinateState
+  uint8_t channel;        // Current channel
+  uint8_t band;           // Current band
+  uint16_t scanCount;     // Number of scans performed
+  uint16_t resultCount;   // Number of results in buffer
+  uint32_t uptime;        // Uptime in seconds
+  int8_t lastError;       // Last error code
+  uint8_t freeHeap;       // Free heap percentage
+};
+
+// Helper function to get channel for 5GHz based on subordinate ID
+inline uint8_t get5GHzChannel(uint8_t subId) {
+  // 5GHz channels: 36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128,
+  //                132, 136, 140, 144, 149, 153, 157, 161, 165
+  const uint8_t channels5GHz[] = {
+    36, 40, 44, 48, 52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128,
+    132, 136, 140, 144, 149, 153, 157, 161, 165
+  };
+
+  if (subId < sizeof(channels5GHz)) {
+    return channels5GHz[subId];
+  }
+  return 36; // Default
+}
+
+// Helper function to get channel for 2.4GHz based on subordinate ID
+inline uint8_t get24GHzChannel(uint8_t subId) {
+  // 2.4GHz channels: 1-13 (14 in some regions)
+  if (subId >= 1 && subId <= 13) {
+    return subId;
+  }
+  return 1; // Default
+}
+
+#endif // PROTOCOL_DEFS_H
