@@ -16,17 +16,22 @@
 #define PACKET_END_MARKER 0x55
 
 // Device Configuration
-#define MAX_SUBORDINATES 48
+#define MAX_SUBORDINATES 52
 #define CONTROLLER_ADDRESS 0x00
+#define UNASSIGNED_ADDRESS 0xFE  // Subordinates boot with this address
 
 // Timing Constants
 #define COMMAND_TIMEOUT_MS 5000
 #define SCAN_TIMEOUT_MS 10000
 #define RESPONSE_DELAY_MS 10
+#define ADDRESS_ASSIGNMENT_TIMEOUT_MS 1000  // Timeout to detect last node
+#define DISCOVERY_RETRY_DELAY_MS 100
 
 // Command Types (Controller -> Subordinate)
 enum CommandType : uint8_t {
   CMD_PING = 0x01,                    // Test connectivity
+  CMD_ASSIGN_ADDRESS = 0x02,          // Auto-discovery address assignment
+  CMD_GPS_UPDATE = 0x03,              // Broadcast current GPS position
   CMD_SET_SCAN_PARAMS = 0x10,         // Set WiFi scan parameters
   CMD_START_SCAN = 0x11,              // Start WiFi scanning
   CMD_STOP_SCAN = 0x12,               // Stop WiFi scanning
@@ -43,6 +48,7 @@ enum CommandType : uint8_t {
 enum ResponseType : uint8_t {
   RESP_ACK = 0x01,                    // Acknowledgment
   RESP_NACK = 0x02,                   // Negative acknowledgment
+  RESP_ADDRESS_ASSIGNED = 0x03,       // Address assignment confirmation
   RESP_STATUS = 0x10,                 // Status information
   RESP_SCAN_RESULT = 0x20,            // WiFi scan result
   RESP_SCAN_COMPLETE = 0x21,          // Scan complete notification
@@ -129,6 +135,22 @@ struct Packet {
   }
 };
 
+// GPS Position Structure
+struct __attribute__((packed)) GPSPosition {
+  float latitude;           // Latitude in decimal degrees (-90 to +90)
+  float longitude;          // Longitude in decimal degrees (-180 to +180)
+  float altitude;           // Altitude in meters
+  uint8_t satellites;       // Number of satellites
+  uint8_t fixQuality;       // 0=no fix, 1=GPS fix, 2=DGPS fix
+  uint32_t timestamp;       // GPS timestamp (milliseconds since epoch or boot)
+};
+
+// Address Assignment Structure
+struct __attribute__((packed)) AddressAssignment {
+  uint8_t assignedAddress;  // Address to assign to the receiving subordinate
+  uint8_t isLastNode;       // 1 if this is determined to be the last node, 0 otherwise
+};
+
 // Scan Parameters Structure
 struct __attribute__((packed)) ScanParams {
   uint8_t band;           // WiFiBand
@@ -149,6 +171,11 @@ struct __attribute__((packed)) WiFiScanResult {
   uint8_t band;           // WiFiBand
   uint8_t authMode;       // Authentication mode
   uint32_t timestamp;     // Time of scan (ms since boot)
+  // GPS coordinates from when network was scanned
+  float latitude;         // Latitude in decimal degrees
+  float longitude;        // Longitude in decimal degrees
+  float altitude;         // Altitude in meters
+  uint8_t gpsQuality;     // GPS fix quality (0=no fix, 1=GPS, 2=DGPS)
 };
 
 // Status Information Structure
@@ -167,16 +194,16 @@ struct __attribute__((packed)) StatusInfo {
 inline uint8_t get5GHzChannel(uint8_t subId) {
   // 5GHz channels: 36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128,
   //                132, 136, 140, 144, 149, 153, 157, 161, 165
+  // We have 25 unique 5GHz channels, so we'll cycle through them for 52 subs
   const uint8_t channels5GHz[] = {
     36, 40, 44, 48, 52, 56, 60, 64,
     100, 104, 108, 112, 116, 120, 124, 128,
     132, 136, 140, 144, 149, 153, 157, 161, 165
   };
 
-  if (subId < sizeof(channels5GHz)) {
-    return channels5GHz[subId];
-  }
-  return 36; // Default
+  // Use modulo to cycle through channels for subordinates > 25
+  uint8_t channelIndex = subId % (sizeof(channels5GHz) / sizeof(channels5GHz[0]));
+  return channels5GHz[channelIndex];
 }
 
 // Helper function to get channel for 2.4GHz based on subordinate ID

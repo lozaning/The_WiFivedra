@@ -4,21 +4,43 @@
  * Performs WiFi scanning on assigned channels and reports results to controller.
  *
  * Hardware: ESP32-C5
- * Communication: Serial to controller
+ * Communication: Daisy chain - Direct UART connection to left and right neighbors
+ *
+ * Daisy Chain Topology:
+ *   Controller <-> Sub1 <-> Sub2 <-> ... <-> Sub48
+ *
+ * Each subordinate (except ends):
+ *   - Upstream (left) connection: Receives from/sends to previous device (toward controller)
+ *   - Downstream (right) connection: Receives from/sends to next device (away from controller)
  */
 
 #include "../common/protocol_defs.h"
 #include "../common/serial_protocol.h"
 #include <WiFi.h>
 
-// Configuration - SET THIS FOR EACH DEVICE
-#define MY_ADDRESS 1  // Change this for each subordinate (1-48)
-
 // Pin Configuration
 #define LED_PIN 2
 
+// UART Pin Configuration
+// Upstream Serial (to previous device / toward controller)
+#define UPSTREAM_TX_PIN 21   // ESP32-C5 TX to previous device's RX
+#define UPSTREAM_RX_PIN 20   // ESP32-C5 RX from previous device's TX
+
+// Downstream Serial (to next device / away from controller)
+#define DOWNSTREAM_TX_PIN 17 // ESP32-C5 TX to next device's RX
+#define DOWNSTREAM_RX_PIN 16 // ESP32-C5 RX from next device's TX
+
 // Serial communication
-SerialProtocol protocol(&Serial, MY_ADDRESS);
+// Use Serial1 for upstream, Serial2 for downstream
+HardwareSerial upstreamSerial(1);    // UART1
+HardwareSerial downstreamSerial(2);  // UART2
+
+// Start with unassigned address - will be auto-assigned during discovery
+SerialProtocol protocol(&upstreamSerial, &downstreamSerial, UNASSIGNED_ADDRESS, false);
+
+// Auto-discovery state
+bool addressAssigned = false;
+uint8_t myAssignedAddress = UNASSIGNED_ADDRESS;
 
 // Scan parameters
 ScanParams scanParams = {
@@ -48,14 +70,43 @@ bool scanningActive = false;
 unsigned long lastScanTime = 0;
 unsigned long bootTime = 0;
 
-// Result buffer
-#define MAX_RESULT_BUFFER 50
-WiFiScanResult resultBuffer[MAX_RESULT_BUFFER];
-uint16_t resultBufferCount = 0;
+// Seen networks tracking
+#define MAX_SEEN_NETWORKS 500
+struct SeenNetwork {
+  uint8_t bssid[6];        // MAC address (unique identifier)
+  uint32_t lastSeen;       // Timestamp when last seen
+  uint16_t seenCount;      // How many times we've seen this network
+};
+
+SeenNetwork seenNetworks[MAX_SEEN_NETWORKS];
+uint16_t seenNetworksCount = 0;
+
+// New networks buffer - only networks not previously seen
+#define MAX_NEW_NETWORKS 100
+WiFiScanResult newNetworksBuffer[MAX_NEW_NETWORKS];
+uint16_t newNetworksCount = 0;
+
+uint16_t totalNetworksScanned = 0;  // Total networks found in scans
+uint16_t totalNewNetworks = 0;      // Total new (unique) networks discovered
+
+// GPS caching - stores most recent GPS position from controller
+GPSPosition cachedGPS = {
+  .latitude = 0.0,
+  .longitude = 0.0,
+  .altitude = 0.0,
+  .satellites = 0,
+  .fixQuality = 0,
+  .timestamp = 0
+};
+bool hasValidGPS = false;
 
 void setup() {
   pinMode(LED_PIN, OUTPUT);
   bootTime = millis();
+
+  // Configure UART pins - always configure both initially
+  upstreamSerial.begin(SERIAL_BAUD_RATE, SERIAL_8N1, UPSTREAM_RX_PIN, UPSTREAM_TX_PIN);
+  downstreamSerial.begin(SERIAL_BAUD_RATE, SERIAL_8N1, DOWNSTREAM_RX_PIN, DOWNSTREAM_TX_PIN);
 
   // Initialize serial protocol
   protocol.begin(SERIAL_BAUD_RATE);
@@ -68,7 +119,50 @@ void setup() {
   status.channel = scanParams.channel;
   status.band = scanParams.band;
 
+  // Wait for address assignment - blink LED rapidly
+  while (!addressAssigned) {
+    digitalWrite(LED_PIN, (millis() / 100) % 2);
+
+    Packet packet;
+    if (protocol.receivePacket(packet)) {
+      if (packet.header.type == CMD_ASSIGN_ADDRESS) {
+        handleAddressAssignment(packet);
+      }
+    }
+    delay(10);
+  }
+
   delay(100);
+}
+
+void handleAddressAssignment(Packet& packet) {
+  if (packet.header.length != sizeof(AddressAssignment)) {
+    return;  // Invalid payload
+  }
+
+  AddressAssignment assignment;
+  memcpy(&assignment, packet.payload, sizeof(AddressAssignment));
+
+  // Adopt the assigned address
+  myAssignedAddress = assignment.assignedAddress;
+  protocol.setAddress(myAssignedAddress);
+  addressAssigned = true;
+
+  // Try to assign address to next subordinate downstream
+  bool hasDownstream = protocol.tryAssignDownstream(myAssignedAddress + 1);
+
+  if (!hasDownstream) {
+    // No downstream device responded - this is the last node
+    protocol.setEndNode(true);
+  }
+
+  // Send confirmation upstream to controller
+  AddressAssignment confirmation;
+  confirmation.assignedAddress = myAssignedAddress;
+  confirmation.isLastNode = protocol.getIsEndNode() ? 1 : 0;
+
+  protocol.sendResponse(CONTROLLER_ADDRESS, RESP_ADDRESS_ASSIGNED,
+                       &confirmation, sizeof(confirmation));
 }
 
 void loop() {
@@ -91,11 +185,14 @@ void loop() {
   status.freeHeap = (ESP.getFreeHeap() * 100) / ESP.getHeapSize();
 
   // LED indicator
-  if (scanningActive) {
-    // Fast blink when scanning
+  if (!addressAssigned) {
+    // Very fast blink when waiting for address
     digitalWrite(LED_PIN, (millis() / 100) % 2);
+  } else if (scanningActive) {
+    // Fast blink when scanning
+    digitalWrite(LED_PIN, (millis() / 200) % 2);
   } else {
-    // Slow blink when idle
+    // Slow blink when idle and addressed
     digitalWrite(LED_PIN, (millis() / 1000) % 2);
   }
 
@@ -108,6 +205,15 @@ void handleCommand(Packet& packet) {
   switch (cmd) {
     case CMD_PING:
       protocol.sendAck(CONTROLLER_ADDRESS);
+      break;
+
+    case CMD_GPS_UPDATE:
+      // Update cached GPS position from controller
+      if (packet.header.length == sizeof(GPSPosition)) {
+        memcpy(&cachedGPS, packet.payload, sizeof(GPSPosition));
+        hasValidGPS = (cachedGPS.fixQuality > 0);
+        // No ACK needed for broadcast GPS updates (reduces traffic)
+      }
       break;
 
     case CMD_SET_SCAN_PARAMS:
@@ -157,7 +263,8 @@ void handleCommand(Packet& packet) {
       break;
 
     case CMD_CLEAR_RESULTS:
-      resultBufferCount = 0;
+      // Clear only the NEW networks buffer (keep seen networks list intact)
+      newNetworksCount = 0;
       status.resultCount = 0;
       protocol.sendAck(CONTROLLER_ADDRESS);
       break;
@@ -246,33 +353,117 @@ void performScan() {
       result.band = BAND_5GHZ;
     }
 
-    // Send result immediately to controller
-    protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_RESULT, &result, sizeof(result));
+    // Add GPS coordinates from cached position
+    // These are from when the scan happened, not when transmitted to controller
+    result.latitude = cachedGPS.latitude;
+    result.longitude = cachedGPS.longitude;
+    result.altitude = cachedGPS.altitude;
+    result.gpsQuality = cachedGPS.fixQuality;
 
-    // Also buffer if there's space
-    if (resultBufferCount < MAX_RESULT_BUFFER) {
-      resultBuffer[resultBufferCount++] = result;
-      status.resultCount = resultBufferCount;
+    // Check if this is a new network or one we've seen before
+    bool isNewNetwork = processNetworkResult(result);
+
+    // Only buffer NEW networks (not previously seen)
+    if (isNewNetwork) {
+      if (newNetworksCount < MAX_NEW_NETWORKS) {
+        newNetworksBuffer[newNetworksCount++] = result;
+        status.resultCount = newNetworksCount;
+      } else {
+        // Buffer full - set error but continue scanning
+        status.lastError = ERR_BUFFER_FULL;
+      }
     }
-
-    // Small delay between results
-    delay(5);
   }
 
   // Clean up
   WiFi.scanDelete();
 
-  // Send scan complete notification
-  protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_COMPLETE, nullptr, 0);
-
+  // Mark scan as complete in status (controller will poll for this)
   status.state = STATE_IDLE;
+
+  // NOTE: We don't send RESP_SCAN_COMPLETE to avoid wire collisions
+  // Controller will poll status to check if scan is complete
+}
+
+// Check if a BSSID exists in the seen networks list
+// Returns index if found, -1 if not found
+int16_t findSeenNetwork(const uint8_t* bssid) {
+  for (uint16_t i = 0; i < seenNetworksCount; i++) {
+    if (memcmp(seenNetworks[i].bssid, bssid, 6) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// Move a seen network to the top of the list (most recent)
+void moveSeenNetworkToTop(uint16_t index) {
+  if (index == 0) return;  // Already at top
+
+  // Save the network
+  SeenNetwork temp = seenNetworks[index];
+
+  // Shift all networks above it down one position
+  for (uint16_t i = index; i > 0; i--) {
+    seenNetworks[i] = seenNetworks[i - 1];
+  }
+
+  // Place the network at the top
+  seenNetworks[0] = temp;
+}
+
+// Add a new network to the seen list (at the top)
+void addToSeenNetworks(const uint8_t* bssid, uint32_t timestamp) {
+  // If list is full, the oldest entry (at the end) gets pushed out
+  if (seenNetworksCount < MAX_SEEN_NETWORKS) {
+    seenNetworksCount++;
+  }
+
+  // Shift all entries down one position
+  for (uint16_t i = seenNetworksCount - 1; i > 0; i--) {
+    seenNetworks[i] = seenNetworks[i - 1];
+  }
+
+  // Add new network at top
+  memcpy(seenNetworks[0].bssid, bssid, 6);
+  seenNetworks[0].lastSeen = timestamp;
+  seenNetworks[0].seenCount = 1;
+}
+
+// Process a scan result: check if new or seen before
+// Returns true if this is a NEW network that should be reported
+bool processNetworkResult(const WiFiScanResult& result) {
+  totalNetworksScanned++;
+
+  int16_t seenIndex = findSeenNetwork(result.bssid);
+
+  if (seenIndex >= 0) {
+    // Network has been seen before
+    // Update the seen count and timestamp
+    seenNetworks[seenIndex].seenCount++;
+    seenNetworks[seenIndex].lastSeen = result.timestamp;
+
+    // Move to top of seen list (most recent)
+    moveSeenNetworkToTop(seenIndex);
+
+    return false;  // Not a new network
+  } else {
+    // This is a NEW network we haven't seen before
+    addToSeenNetworks(result.bssid, result.timestamp);
+    totalNewNetworks++;
+
+    return true;  // New network - should be reported
+  }
 }
 
 void sendBufferedResults() {
-  for (uint16_t i = 0; i < resultBufferCount; i++) {
+  // Send only NEW networks (not previously seen)
+  for (uint16_t i = 0; i < newNetworksCount; i++) {
     protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_RESULT,
-                         &resultBuffer[i], sizeof(WiFiScanResult));
-    delay(5);
+                         &newNetworksBuffer[i], sizeof(WiFiScanResult));
+    // No delay needed - controller polls continuously
   }
+
+  // Send final ACK to indicate transmission complete
   protocol.sendAck(CONTROLLER_ADDRESS);
 }
