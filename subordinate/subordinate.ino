@@ -70,11 +70,24 @@ bool scanningActive = false;
 unsigned long lastScanTime = 0;
 unsigned long bootTime = 0;
 
-// Result buffer - increased to handle more results between polls
-#define MAX_RESULT_BUFFER 100
-WiFiScanResult resultBuffer[MAX_RESULT_BUFFER];
-uint16_t resultBufferCount = 0;
-uint16_t totalResultsScanned = 0;  // Track total results even if buffer overflows
+// Seen networks tracking
+#define MAX_SEEN_NETWORKS 500
+struct SeenNetwork {
+  uint8_t bssid[6];        // MAC address (unique identifier)
+  uint32_t lastSeen;       // Timestamp when last seen
+  uint16_t seenCount;      // How many times we've seen this network
+};
+
+SeenNetwork seenNetworks[MAX_SEEN_NETWORKS];
+uint16_t seenNetworksCount = 0;
+
+// New networks buffer - only networks not previously seen
+#define MAX_NEW_NETWORKS 100
+WiFiScanResult newNetworksBuffer[MAX_NEW_NETWORKS];
+uint16_t newNetworksCount = 0;
+
+uint16_t totalNetworksScanned = 0;  // Total networks found in scans
+uint16_t totalNewNetworks = 0;      // Total new (unique) networks discovered
 
 void setup() {
   pinMode(LED_PIN, OUTPUT);
@@ -230,7 +243,8 @@ void handleCommand(Packet& packet) {
       break;
 
     case CMD_CLEAR_RESULTS:
-      resultBufferCount = 0;
+      // Clear only the NEW networks buffer (keep seen networks list intact)
+      newNetworksCount = 0;
       status.resultCount = 0;
       protocol.sendAck(CONTROLLER_ADDRESS);
       break;
@@ -319,16 +333,18 @@ void performScan() {
       result.band = BAND_5GHZ;
     }
 
-    // Track total scanned
-    totalResultsScanned++;
+    // Check if this is a new network or one we've seen before
+    bool isNewNetwork = processNetworkResult(result);
 
-    // Buffer result if there's space
-    if (resultBufferCount < MAX_RESULT_BUFFER) {
-      resultBuffer[resultBufferCount++] = result;
-      status.resultCount = resultBufferCount;
-    } else {
-      // Buffer full - set error but continue scanning
-      status.lastError = ERR_BUFFER_FULL;
+    // Only buffer NEW networks (not previously seen)
+    if (isNewNetwork) {
+      if (newNetworksCount < MAX_NEW_NETWORKS) {
+        newNetworksBuffer[newNetworksCount++] = result;
+        status.resultCount = newNetworksCount;
+      } else {
+        // Buffer full - set error but continue scanning
+        status.lastError = ERR_BUFFER_FULL;
+      }
     }
   }
 
@@ -342,18 +358,83 @@ void performScan() {
   // Controller will poll status to check if scan is complete
 }
 
-void sendBufferedResults() {
-  // Send all buffered results with small delays to prevent overwhelming the chain
-  for (uint16_t i = 0; i < resultBufferCount; i++) {
-    protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_RESULT,
-                         &resultBuffer[i], sizeof(WiFiScanResult));
-
-    // Add delay every 10 results to let the chain clear
-    if ((i + 1) % 10 == 0) {
-      delay(20);
-    } else {
-      delay(5);
+// Check if a BSSID exists in the seen networks list
+// Returns index if found, -1 if not found
+int16_t findSeenNetwork(const uint8_t* bssid) {
+  for (uint16_t i = 0; i < seenNetworksCount; i++) {
+    if (memcmp(seenNetworks[i].bssid, bssid, 6) == 0) {
+      return i;
     }
+  }
+  return -1;
+}
+
+// Move a seen network to the top of the list (most recent)
+void moveSeenNetworkToTop(uint16_t index) {
+  if (index == 0) return;  // Already at top
+
+  // Save the network
+  SeenNetwork temp = seenNetworks[index];
+
+  // Shift all networks above it down one position
+  for (uint16_t i = index; i > 0; i--) {
+    seenNetworks[i] = seenNetworks[i - 1];
+  }
+
+  // Place the network at the top
+  seenNetworks[0] = temp;
+}
+
+// Add a new network to the seen list (at the top)
+void addToSeenNetworks(const uint8_t* bssid, uint32_t timestamp) {
+  // If list is full, the oldest entry (at the end) gets pushed out
+  if (seenNetworksCount < MAX_SEEN_NETWORKS) {
+    seenNetworksCount++;
+  }
+
+  // Shift all entries down one position
+  for (uint16_t i = seenNetworksCount - 1; i > 0; i--) {
+    seenNetworks[i] = seenNetworks[i - 1];
+  }
+
+  // Add new network at top
+  memcpy(seenNetworks[0].bssid, bssid, 6);
+  seenNetworks[0].lastSeen = timestamp;
+  seenNetworks[0].seenCount = 1;
+}
+
+// Process a scan result: check if new or seen before
+// Returns true if this is a NEW network that should be reported
+bool processNetworkResult(const WiFiScanResult& result) {
+  totalNetworksScanned++;
+
+  int16_t seenIndex = findSeenNetwork(result.bssid);
+
+  if (seenIndex >= 0) {
+    // Network has been seen before
+    // Update the seen count and timestamp
+    seenNetworks[seenIndex].seenCount++;
+    seenNetworks[seenIndex].lastSeen = result.timestamp;
+
+    // Move to top of seen list (most recent)
+    moveSeenNetworkToTop(seenIndex);
+
+    return false;  // Not a new network
+  } else {
+    // This is a NEW network we haven't seen before
+    addToSeenNetworks(result.bssid, result.timestamp);
+    totalNewNetworks++;
+
+    return true;  // New network - should be reported
+  }
+}
+
+void sendBufferedResults() {
+  // Send only NEW networks (not previously seen)
+  for (uint16_t i = 0; i < newNetworksCount; i++) {
+    protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_RESULT,
+                         &newNetworksBuffer[i], sizeof(WiFiScanResult));
+    // No delay needed - controller polls continuously
   }
 
   // Send final ACK to indicate transmission complete

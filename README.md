@@ -42,9 +42,11 @@ The WiFivedra is the second generation WiFi monitoring device featuring up to 52
 - No manual address configuration needed!
 
 **Poll-Based Communication**:
-- Subordinates buffer scan results locally (100 results)
-- Controller polls subordinates in round-robin (every 5 seconds)
-- Results transmitted only when requested
+- Subordinates buffer only NEW networks (not previously seen)
+- Each subordinate tracks last 500 unique networks by MAC address
+- Deduplication: Only first sighting of a network is reported
+- Controller polls subordinates continuously in round-robin
+- Results transmitted only when requested (no delays between polls)
 - Eliminates wire collisions in the daisy chain
 - Subordinates ONLY transmit when polled (except during discovery)
 
@@ -98,15 +100,24 @@ Connect to controller serial terminal (115200 baud):
 ## Scanning Workflow
 
 1. **Controller** sends `CMD_START_SCAN` to all subordinates
-2. **Subordinates** begin continuous scanning and buffer results (up to 100 networks)
-3. **Controller** polls subordinates in round-robin every 5 seconds:
+2. **Subordinates** begin continuous scanning:
+   - Each scan result is checked against the "seen networks" list (500 entries)
+   - If network was seen before: Update timestamp and seen count, DON'T buffer
+   - If network is NEW: Add to seen list AND buffer for reporting (up to 100 new networks)
+3. **Controller** polls subordinates continuously in round-robin (no delays):
    - Sends `CMD_GET_SCAN_RESULTS` to one subordinate
-   - Subordinate transmits all buffered results
-   - Controller logs results to SD card
+   - Subordinate transmits only NEW networks (not previously seen)
+   - Controller logs NEW networks to SD card
    - Controller sends `CMD_CLEAR_RESULTS` to free buffer
-4. **Repeat** - Each subordinate is polled every ~4 minutes (52 subs × 5 sec)
+   - Immediately polls next subordinate
+4. **Cycle time**: Each subordinate polled every ~6 seconds (52 subs × ~120ms per poll)
 
-This design prevents wire collisions and ensures smooth data flow in the daisy chain.
+### Benefits of This Design:
+- ✅ **No wire collisions** - One subordinate transmits at a time
+- ✅ **Massive bandwidth savings** - Only NEW networks reported
+- ✅ **Instant polling** - Controller continuously requests data
+- ✅ **Deduplication** - Each subordinate tracks 500 unique networks
+- ✅ **Efficient** - No delays, no repeated transmissions
 
 ## Data Format
 
@@ -150,10 +161,13 @@ Each subordinate is automatically assigned a specific channel:
 
 - **Scan Rate**: ~1 scan per second per subordinate (configurable)
 - **Coverage**: All WiFi channels with double coverage (52 subs / 25 channels)
-- **Buffer Capacity**: 100 networks per subordinate
-- **Poll Rate**: Each subordinate polled every ~4 minutes (5 sec × 52 subs)
-- **Data Rate**: Efficient batched transmission, no wire collisions
-- **Storage**: ~500 bytes per network detection
+- **Deduplication**: 500 unique networks tracked per subordinate (by MAC address)
+- **New Network Buffer**: 100 new networks per subordinate
+- **Poll Rate**: Each subordinate polled every ~6 seconds (52 subs × ~120ms)
+- **Data Rate**: Only NEW networks transmitted (massive bandwidth savings)
+- **Transmission**: Continuous polling with zero delays between subordinates
+- **Wire Collisions**: Zero (one subordinate transmits at a time)
+- **Storage**: ~500 bytes per NEW network detection
 - **Battery Life**: ~1-2 hours on 5000mAh LiPo (scanning mode)
 
 ## Use Cases

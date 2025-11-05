@@ -62,10 +62,9 @@ unsigned long scanStartTime = 0;
 uint32_t totalScansReceived = 0;
 
 // Result polling
-unsigned long lastPollTime = 0;
-#define POLL_INTERVAL_MS 5000  // Poll subordinates every 5 seconds
 uint8_t currentPollIndex = 0;  // Round-robin polling
 uint8_t pendingResultsFrom = 0;  // Track which subordinate we're receiving results from
+bool waitingForResults = false;  // True when waiting for a subordinate to finish sending results
 
 // State machine
 enum ControllerState {
@@ -153,11 +152,11 @@ void loop() {
       break;
 
     case CTRL_SCANNING:
-      // Poll subordinates for results in round-robin fashion
-      if (numSubordinates > 0 && millis() - lastPollTime > POLL_INTERVAL_MS) {
+      // Poll subordinates continuously when not waiting for results
+      if (numSubordinates > 0 && !waitingForResults) {
         pollSubordinateForResults(currentPollIndex);
         currentPollIndex = (currentPollIndex + 1) % numSubordinates;
-        lastPollTime = millis();
+        waitingForResults = true;
       }
 
       // Periodic status printout
@@ -319,6 +318,7 @@ void handlePacket(Packet& packet) {
         // Result transmission complete, clear the subordinate's buffer
         protocol.sendCommand(packet.header.srcAddr, CMD_CLEAR_RESULTS);
         pendingResultsFrom = 0;  // Clear pending flag
+        waitingForResults = false;  // Ready to poll next subordinate
       }
       break;
 
