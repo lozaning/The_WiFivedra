@@ -61,6 +61,12 @@ bool sdCardAvailable = false;
 unsigned long scanStartTime = 0;
 uint32_t totalScansReceived = 0;
 
+// Result polling
+unsigned long lastPollTime = 0;
+#define POLL_INTERVAL_MS 5000  // Poll subordinates every 5 seconds
+uint8_t currentPollIndex = 0;  // Round-robin polling
+uint8_t pendingResultsFrom = 0;  // Track which subordinate we're receiving results from
+
 // State machine
 enum ControllerState {
   CTRL_INIT,
@@ -147,7 +153,14 @@ void loop() {
       break;
 
     case CTRL_SCANNING:
-      // Periodic status check
+      // Poll subordinates for results in round-robin fashion
+      if (numSubordinates > 0 && millis() - lastPollTime > POLL_INTERVAL_MS) {
+        pollSubordinateForResults(currentPollIndex);
+        currentPollIndex = (currentPollIndex + 1) % numSubordinates;
+        lastPollTime = millis();
+      }
+
+      // Periodic status printout
       if (millis() - scanStartTime > 30000) {
         printStatistics();
         scanStartTime = millis();
@@ -270,6 +283,23 @@ void stopScanning() {
   state = CTRL_IDLE;
 }
 
+void pollSubordinateForResults(uint8_t index) {
+  if (index >= numSubordinates || !subordinates[index].online) {
+    return;
+  }
+
+  uint8_t subAddr = subordinates[index].address;
+
+  // Request scan results from this subordinate
+  protocol.sendCommand(subAddr, CMD_GET_SCAN_RESULTS);
+
+  // Mark that we're expecting results from this subordinate
+  pendingResultsFrom = subAddr;
+
+  // Note: Results will come back asynchronously via handlePacket()
+  // When we receive the final ACK, we'll send CMD_CLEAR_RESULTS to free the buffer
+}
+
 void handlePacket(Packet& packet) {
   uint8_t subIndex = packet.header.srcAddr - 1;
 
@@ -284,7 +314,12 @@ void handlePacket(Packet& packet) {
   // Handle different response types
   switch (packet.header.type) {
     case RESP_ACK:
-      // Acknowledgment received
+      // Check if this is the final ACK from result transmission
+      if (pendingResultsFrom == packet.header.srcAddr) {
+        // Result transmission complete, clear the subordinate's buffer
+        protocol.sendCommand(packet.header.srcAddr, CMD_CLEAR_RESULTS);
+        pendingResultsFrom = 0;  // Clear pending flag
+      }
       break;
 
     case RESP_ADDRESS_ASSIGNED:
@@ -315,10 +350,6 @@ void handlePacket(Packet& packet) {
         memcpy(&result, packet.payload, sizeof(WiFiScanResult));
         handleScanResult(packet.header.srcAddr, result);
       }
-      break;
-
-    case RESP_SCAN_COMPLETE:
-      Serial.printf("Sub %d: Scan complete\n", packet.header.srcAddr);
       break;
 
     case RESP_ERROR:

@@ -70,10 +70,11 @@ bool scanningActive = false;
 unsigned long lastScanTime = 0;
 unsigned long bootTime = 0;
 
-// Result buffer
-#define MAX_RESULT_BUFFER 50
+// Result buffer - increased to handle more results between polls
+#define MAX_RESULT_BUFFER 100
 WiFiScanResult resultBuffer[MAX_RESULT_BUFFER];
 uint16_t resultBufferCount = 0;
+uint16_t totalResultsScanned = 0;  // Track total results even if buffer overflows
 
 void setup() {
   pinMode(LED_PIN, OUTPUT);
@@ -318,33 +319,43 @@ void performScan() {
       result.band = BAND_5GHZ;
     }
 
-    // Send result immediately to controller
-    protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_RESULT, &result, sizeof(result));
+    // Track total scanned
+    totalResultsScanned++;
 
-    // Also buffer if there's space
+    // Buffer result if there's space
     if (resultBufferCount < MAX_RESULT_BUFFER) {
       resultBuffer[resultBufferCount++] = result;
       status.resultCount = resultBufferCount;
+    } else {
+      // Buffer full - set error but continue scanning
+      status.lastError = ERR_BUFFER_FULL;
     }
-
-    // Small delay between results
-    delay(5);
   }
 
   // Clean up
   WiFi.scanDelete();
 
-  // Send scan complete notification
-  protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_COMPLETE, nullptr, 0);
-
+  // Mark scan as complete in status (controller will poll for this)
   status.state = STATE_IDLE;
+
+  // NOTE: We don't send RESP_SCAN_COMPLETE to avoid wire collisions
+  // Controller will poll status to check if scan is complete
 }
 
 void sendBufferedResults() {
+  // Send all buffered results with small delays to prevent overwhelming the chain
   for (uint16_t i = 0; i < resultBufferCount; i++) {
     protocol.sendResponse(CONTROLLER_ADDRESS, RESP_SCAN_RESULT,
                          &resultBuffer[i], sizeof(WiFiScanResult));
-    delay(5);
+
+    // Add delay every 10 results to let the chain clear
+    if ((i + 1) % 10 == 0) {
+      delay(20);
+    } else {
+      delay(5);
+    }
   }
+
+  // Send final ACK to indicate transmission complete
   protocol.sendAck(CONTROLLER_ADDRESS);
 }
