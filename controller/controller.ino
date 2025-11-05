@@ -79,14 +79,18 @@ String nmeaBuffer = "";  // Buffer for NMEA sentence parsing
 
 // GPS time tracking for absolute timestamps
 struct GPSTime {
+  uint8_t day;
+  uint8_t month;
+  uint16_t year;
   uint8_t hour;
   uint8_t minute;
   uint8_t second;
   uint16_t millisecond;
   uint32_t referenceMillis;  // millis() when GPS time was captured
   bool valid;
+  bool dateValid;  // Date is only available from RMC sentences
 };
-GPSTime gpsTime = {0, 0, 0, 0, 0, false};
+GPSTime gpsTime = {0, 0, 0, 0, 0, 0, 0, 0, false, false};
 
 // Wardriving session tracking
 uint16_t currentSessionNumber = 0;
@@ -610,6 +614,87 @@ void parseNMEA(String sentence) {
       }
     }
   }
+  else if (sentence.startsWith("$GPRMC") || sentence.startsWith("$GNRMC")) {
+    // Example: $GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A
+    // Split by commas
+    int idx[15];
+    int count = 0;
+    idx[0] = 0;
+
+    for (int i = 0; i < sentence.length() && count < 14; i++) {
+      if (sentence[i] == ',') {
+        idx[++count] = i + 1;
+      }
+    }
+
+    if (count >= 9) {
+      // Parse time (HHMMSS.sss format)
+      String timeStr = sentence.substring(idx[0], idx[1] - 1);
+
+      // Parse status (A=active/valid, V=void/invalid)
+      String statusStr = sentence.substring(idx[1], idx[2] - 1);
+
+      // Only process if we have a valid fix
+      if (statusStr == "A") {
+        // Parse latitude
+        String latStr = sentence.substring(idx[2], idx[3] - 1);
+        String latDir = sentence.substring(idx[3], idx[4] - 1);
+
+        // Parse longitude
+        String lonStr = sentence.substring(idx[4], idx[5] - 1);
+        String lonDir = sentence.substring(idx[5], idx[6] - 1);
+
+        // Skip speed (idx[6]) and course (idx[7])
+
+        // Parse date (DDMMYY format)
+        String dateStr = sentence.substring(idx[8], idx[9] - 1);
+
+        // Parse GPS time if available
+        if (timeStr.length() >= 6) {
+          gpsTime.hour = timeStr.substring(0, 2).toInt();
+          gpsTime.minute = timeStr.substring(2, 4).toInt();
+          gpsTime.second = timeStr.substring(4, 6).toInt();
+          if (timeStr.length() > 7 && timeStr.indexOf('.') > 0) {
+            gpsTime.millisecond = timeStr.substring(7).toInt();
+          } else {
+            gpsTime.millisecond = 0;
+          }
+          gpsTime.referenceMillis = millis();
+          gpsTime.valid = true;
+        }
+
+        // Parse GPS date if available
+        if (dateStr.length() >= 6) {
+          gpsTime.day = dateStr.substring(0, 2).toInt();
+          gpsTime.month = dateStr.substring(2, 4).toInt();
+          uint8_t yearShort = dateStr.substring(4, 6).toInt();
+          // Convert 2-digit year to 4-digit (assume 2000-2099)
+          gpsTime.year = 2000 + yearShort;
+          gpsTime.dateValid = true;
+        }
+
+        // Parse position data
+        if (latStr.length() > 0 && lonStr.length() > 0) {
+          // Convert NMEA format (DDMM.MMMM) to decimal degrees
+          float lat = latStr.substring(0, 2).toFloat() + latStr.substring(2).toFloat() / 60.0;
+          if (latDir == "S") lat = -lat;
+
+          float lon = lonStr.substring(0, 3).toFloat() + lonStr.substring(3).toFloat() / 60.0;
+          if (lonDir == "W") lon = -lon;
+
+          currentGPS.latitude = lat;
+          currentGPS.longitude = lon;
+          // RMC doesn't provide altitude or satellites, keep existing values
+          currentGPS.timestamp = millis();
+
+          // Set fix quality to 1 (GPS fix) since we have valid RMC data
+          if (currentGPS.fixQuality == 0) {
+            currentGPS.fixQuality = 1;
+          }
+        }
+      }
+    }
+  }
 }
 
 // Broadcast current GPS position to all subordinates
@@ -634,15 +719,43 @@ String timestampToISO8601(uint32_t timestamp) {
   // Calculate total seconds from GPS time + elapsed time
   uint32_t totalSeconds = gpsTime.hour * 3600 + gpsTime.minute * 60 + gpsTime.second + (elapsedMs / 1000);
 
-  // Calculate time components (note: this doesn't handle day overflow)
+  // Calculate day overflow
+  uint32_t daysElapsed = totalSeconds / 86400;  // 86400 seconds in a day
+  totalSeconds = totalSeconds % 86400;
+
+  // Calculate time components
   uint8_t hours = (totalSeconds / 3600) % 24;
   uint8_t minutes = (totalSeconds / 60) % 60;
   uint8_t seconds = totalSeconds % 60;
 
-  // Format as ISO 8601 (without date since GPS doesn't provide it in GGA)
-  // Using a placeholder date - user should ideally set this or use RMC sentence
+  // Use real date if available from RMC, otherwise placeholder
   char buffer[32];
-  snprintf(buffer, sizeof(buffer), "2024-01-01 %02d:%02d:%02d", hours, minutes, seconds);
+  if (gpsTime.dateValid) {
+    // Calculate date with day overflow
+    uint16_t year = gpsTime.year;
+    uint8_t month = gpsTime.month;
+    uint8_t day = gpsTime.day + daysElapsed;
+
+    // Simple day overflow handling (approximate, doesn't handle month/year boundaries perfectly)
+    // Days per month (not accounting for leap years)
+    const uint8_t daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+
+    while (day > daysInMonth[month - 1]) {
+      day -= daysInMonth[month - 1];
+      month++;
+      if (month > 12) {
+        month = 1;
+        year++;
+      }
+    }
+
+    snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
+             year, month, day, hours, minutes, seconds);
+  } else {
+    // No date available, use placeholder
+    snprintf(buffer, sizeof(buffer), "0000-00-00 %02d:%02d:%02d", hours, minutes, seconds);
+  }
+
   return String(buffer);
 }
 
