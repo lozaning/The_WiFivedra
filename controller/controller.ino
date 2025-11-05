@@ -19,6 +19,29 @@
 #include <SD.h>
 #include <SPI.h>
 
+// Forward declarations
+void autoDiscoverSubordinates();
+void printAutoDiscoveryResults();
+void discoverSubordinates();
+void configureSubordinates();
+void startScanning();
+void stopScanning();
+void pollSubordinateForResults(uint8_t index);
+void handlePacket(Packet& packet);
+void handleScanResult(uint8_t subAddr, WiFiScanResult& result);
+void logScanResult(uint8_t subAddr, WiFiScanResult& result);
+void createNewLogFile();
+void printDiscoveryResults();
+void printStatistics();
+void handleSerialCommand();
+void readGPS();
+void parseNMEA(String sentence);
+void broadcastGPS();
+String timestampToISO8601(uint32_t timestamp);
+const char* authModeToWiGLE(uint8_t authMode);
+float getGPSAccuracy(uint8_t gpsQuality);
+uint16_t findNextSessionNumber();
+
 // Pin Configuration
 #define SD_CS_PIN 5
 #define LED_PIN 2
